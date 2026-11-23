@@ -194,6 +194,23 @@ textarea:focus-visible {
   text-underline-offset: 3px;
 }
 
+.markdown a[data-analyze]::after {
+  content: "分析";
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  vertical-align: 1px;
+}
+
+.markdown a[data-analyze]:hover::after {
+  background: var(--accent);
+  color: #fff;
+}
+
 .markdown a:hover {
   color: var(--accent-deep);
 }

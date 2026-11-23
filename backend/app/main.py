@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
+from .agent.analysis import PaperAnalyzer, PaperInput, demo_analysis
 from .agent.graph import build_agent
 from .config import get_settings
 from .demo import build_demo_reply, build_demo_sources
@@ -20,6 +21,14 @@ logger = logging.getLogger("harness")
 settings = get_settings()
 store = ConversationStore()
 _agent = None
+_analyzer = None
+
+
+def get_analyzer():
+    global _analyzer
+    if _analyzer is None and settings.llm_configured:
+        _analyzer = PaperAnalyzer(settings)
+    return _analyzer
 
 
 def get_agent():
@@ -48,9 +57,57 @@ app.add_middleware(
 router = APIRouter(prefix="/api", dependencies=[Depends(verify_token)])
 
 
+PROFILE_LABELS = {
+    "background": {
+        "none": "零基础，没有系统学过相关课程",
+        "course": "学过相关基础课程，但没读过这个方向的论文",
+        "research": "有一定研究经验，读过部分相关论文",
+    },
+    "goal": {
+        "overview": "了解领域全景",
+        "project": "为毕业设计或课题做准备",
+        "research": "找到可以深入的研究问题",
+    },
+    "preference": {
+        "survey": "优先阅读综述",
+        "classic": "优先阅读经典论文",
+        "recent": "优先阅读最新研究",
+    },
+}
+
+
+class LearningProfile(BaseModel):
+    background: Optional[Literal["none", "course", "research"]] = None
+    goal: Optional[Literal["overview", "project", "research"]] = None
+    weekly_hours: Optional[int] = Field(default=None, ge=1, le=60)
+    preference: Optional[Literal["survey", "classic", "recent"]] = None
+
+    def is_empty(self) -> bool:
+        return all(value is None for value in self.model_dump().values())
+
+    def describe(self) -> str:
+        lines = []
+        if self.background:
+            lines.append(f"- 知识基础：{PROFILE_LABELS['background'][self.background]}")
+        if self.goal:
+            lines.append(f"- 学习目标：{PROFILE_LABELS['goal'][self.goal]}")
+        if self.weekly_hours:
+            lines.append(f"- 每周可投入：约 {self.weekly_hours} 小时")
+        if self.preference:
+            lines.append(f"- 阅读偏好：{PROFILE_LABELS['preference'][self.preference]}")
+        return "\n".join(lines)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     thread_id: Optional[str] = None
+    profile: Optional[LearningProfile] = None
+
+
+def message_for_agent(message: str, profile: Optional[LearningProfile]) -> str:
+    if profile is None or profile.is_empty():
+        return message
+    return f"【学习画像】（用户在界面上选择）\n{profile.describe()}\n\n【问题】\n{message}"
 
 
 def sse(event: str, data: dict) -> str:
@@ -140,7 +197,12 @@ def event_headers() -> dict:
     }
 
 
-async def live_stream(message: str, record: ThreadRecord, request: Request):
+async def live_stream(
+    message: str,
+    record: ThreadRecord,
+    request: Request,
+    profile: Optional[LearningProfile] = None,
+):
     try:
         agent = get_agent()
     except Exception:
@@ -154,6 +216,7 @@ async def live_stream(message: str, record: ThreadRecord, request: Request):
 
     config = {"configurable": {"thread_id": record.id}, "recursion_limit": 14}
     collected = []
+    needs_break = False
     answer_fallback = ""
     sources: List[dict] = []
     seen_urls = set()
@@ -163,7 +226,7 @@ async def live_stream(message: str, record: ThreadRecord, request: Request):
 
     try:
         async for event in agent.astream_events(
-            {"messages": [HumanMessage(content=message)]},
+            {"messages": [HumanMessage(content=message_for_agent(message, profile))]},
             config=config,
             version="v2",
         ):
@@ -171,9 +234,19 @@ async def live_stream(message: str, record: ThreadRecord, request: Request):
                 return
 
             kind = event.get("event")
-            if kind == "on_chat_model_stream":
+            if kind == "on_chat_model_start":
+                # 工具调用前后的多轮输出各自成段，避免标题粘在上一句末尾
+                needs_break = bool(collected)
+            elif kind == "on_chat_model_stream":
                 text = text_from_chunk(event.get("data", {}).get("chunk"))
                 if text:
+                    if needs_break:
+                        needs_break = False
+                        tail = "".join(collected)[-2:]
+                        if tail != "\n\n":
+                            gap = "\n" if tail.endswith("\n") else "\n\n"
+                            collected.append(gap)
+                            yield sse("token", {"text": gap})
                     collected.append(text)
                     yield sse("token", {"text": text})
             elif kind == "on_chat_model_end":
@@ -333,7 +406,9 @@ def health() -> dict:
         "demo_mode": not settings.llm_configured,
         "llm_configured": settings.llm_configured,
         "model": settings.deepseek_model,
-        "search": "arXiv + Google Scholar" if settings.scholar_configured else "arXiv",
+        "search": "arXiv + OpenAlex + Google Scholar"
+        if settings.scholar_configured
+        else "arXiv + OpenAlex",
         "memory": "in-process",
     }
 
@@ -365,16 +440,35 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
     record = store.get(payload.thread_id)
     if record is None:
         record = store.create_thread(message)
-    store.append_user(record, message)
+    profile = payload.profile if payload.profile and not payload.profile.is_empty() else None
+    store.append_user(
+        record, message, profile.model_dump(exclude_none=True) if profile else None
+    )
 
     generator = (
         demo_stream(message, record, request)
         if not settings.llm_configured
-        else live_stream(message, record, request)
+        else live_stream(message, record, request, profile)
     )
     return StreamingResponse(
         generator, media_type="text/event-stream", headers=event_headers()
     )
+
+
+@router.post("/papers/analyze")
+async def analyze_paper(paper: PaperInput) -> dict:
+    analyzer = get_analyzer()
+    if analyzer is None:
+        return {"demo": True, "analysis": demo_analysis(paper).model_dump()}
+    was_cached = analyzer.cached(paper.url) is not None
+    try:
+        analysis = await analyzer.analyze(paper)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("paper analysis failed")
+        raise HTTPException(status_code=502, detail=friendly_error(exc)) from exc
+    return {"demo": False, "cached": was_cached, "analysis": analysis.model_dump()}
 
 
 app.include_router(router)

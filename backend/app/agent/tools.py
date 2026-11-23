@@ -223,3 +223,136 @@ def search_scholar(query: str, max_results: int = 5) -> str:
         {"source": "google_scholar", "query": cleaned_query, "results": results},
         ensure_ascii=False,
     )
+
+
+def _abstract_from_index(index) -> str:
+    if not isinstance(index, dict):
+        return ""
+    positions = []
+    for word, spots in index.items():
+        if isinstance(spots, list):
+            positions.extend((pos, word) for pos in spots if isinstance(pos, int))
+    return " ".join(word for _, word in sorted(positions))
+
+
+@tool
+def search_openalex(query: str, max_results: int = 5, reviews_only: bool = False) -> str:
+    """检索 OpenAlex 学术元数据（正式发表论文，含 DOI、期刊/会议、引用量）。适合核验文献信息、查找综述和经典论文。
+
+    Args:
+        query: 检索关键词，优先使用英文术语，例如 "federated learning privacy"。
+        max_results: 返回论文数量，1 到 8 之间，默认 5。
+        reviews_only: 为 true 时只返回综述论文，适合入门阶段建立领域全景。
+    """
+    cleaned_query = _clean(query)
+    if not cleaned_query:
+        return json.dumps(
+            {"query": cleaned_query, "results": [], "error": "检索关键词为空"},
+            ensure_ascii=False,
+        )
+
+    try:
+        limit = max(1, min(int(max_results), 8))
+    except (TypeError, ValueError):
+        limit = 5
+
+    settings = get_settings()
+    params = {
+        "search": cleaned_query,
+        "per-page": limit,
+        "select": "id,doi,display_name,publication_year,type,cited_by_count,"
+        "primary_location,authorships,abstract_inverted_index",
+    }
+    if reviews_only:
+        params["filter"] = "type:review"
+    if settings.openalex_api_key.strip():
+        params["api_key"] = settings.openalex_api_key.strip()
+
+    try:
+        response = httpx.get(
+            settings.openalex_endpoint,
+            params=params,
+            headers={"User-Agent": "ResearchHarness/0.1"},
+            timeout=20.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        message = (
+            "OpenAlex 检索请求过于频繁，请稍后再试"
+            if exc.response.status_code == 429
+            else "OpenAlex 检索暂时不可用，请稍后再试"
+        )
+        return json.dumps(
+            {"query": cleaned_query, "results": [], "error": message},
+            ensure_ascii=False,
+        )
+    except httpx.HTTPError:
+        return json.dumps(
+            {
+                "query": cleaned_query,
+                "results": [],
+                "error": "OpenAlex 检索暂时不可用，请稍后再试",
+            },
+            ensure_ascii=False,
+        )
+    except ValueError:
+        return json.dumps(
+            {
+                "query": cleaned_query,
+                "results": [],
+                "error": "OpenAlex 返回内容无法解析",
+            },
+            ensure_ascii=False,
+        )
+
+    works = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(works, list):
+        works = []
+
+    results = []
+    for work in works:
+        if not isinstance(work, dict):
+            continue
+        title = _clean(str(work.get("display_name") or ""))
+        location = work.get("primary_location") or {}
+        source = location.get("source") or {}
+        url = str(work.get("doi") or location.get("landing_page_url") or work.get("id") or "")
+        if not title or not (url.startswith("https://") or url.startswith("http://")):
+            continue
+
+        authors = [
+            _clean(str((item.get("author") or {}).get("display_name", "")))
+            for item in work.get("authorships") or []
+            if isinstance(item, dict)
+        ]
+        authors = [name for name in authors if name]
+        author_text = ", ".join(authors[:4])
+        if len(authors) > 4:
+            author_text += " 等"
+
+        venue = _clean(str(source.get("display_name") or ""))
+        is_review = work.get("type") == "review"
+        category = f"综述 · {venue}" if is_review and venue else ("综述" if is_review else venue)
+        cited_by = work.get("cited_by_count")
+        year = work.get("publication_year")
+
+        results.append(
+            {
+                "title": title[:300],
+                "authors": author_text[:200],
+                "year": str(year) if isinstance(year, int) else "",
+                "url": url[:500],
+                "category": category[:40],
+                "summary": _clean(_abstract_from_index(work.get("abstract_inverted_index")))[:320],
+                "doi": str(work.get("doi") or ""),
+                "is_review": is_review,
+                "cited_by": cited_by if isinstance(cited_by, int) else None,
+            }
+        )
+
+    return json.dumps(
+        {"source": "openalex", "query": cleaned_query, "results": results},
+        ensure_ascii=False,
+    )

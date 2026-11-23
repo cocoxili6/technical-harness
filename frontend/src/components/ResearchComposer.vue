@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import ProfilePicker from "./ProfilePicker.vue";
+import type { LearningProfile } from "../types";
 
 const props = defineProps<{
   variant: "hero" | "docked";
@@ -12,6 +14,8 @@ const emit = defineEmits<{
   (e: "submit", text: string): void;
   (e: "stop"): void;
 }>();
+
+const profile = defineModel<LearningProfile>("profile", { required: true });
 
 const draft = defineModel<string>({ default: "" });
 const textarea = ref<HTMLTextAreaElement | null>(null);
@@ -60,6 +64,11 @@ defineExpose({ focus });
 
 <template>
   <form class="composer" :class="variant" @submit.prevent="submit">
+    <ProfilePicker
+      v-if="variant === 'hero'"
+      v-model="profile"
+      :disabled="disabled || streaming"
+    />
     <label class="sr-only" for="research-input">研究问题</label>
     <textarea
       id="research-input"

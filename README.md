@@ -1,6 +1,6 @@
 # 研途 · Research Harness
 
-面向科研入门者的文献调研工作台：输入一个研究方向或问题，智能体检索 arXiv 与 Google Scholar、梳理方法脉络，输出分阶段研究路线和下一步动作。
+面向科研入门者的文献调研工作台：输入一个研究方向或问题，智能体检索 arXiv、OpenAlex 与 Google Scholar、梳理方法脉络，输出按入门、基础、进阶、前沿四阶段排序的文献阅读路线和下一步动作。
 
 - 前端：Vue 3 + Vite + TypeScript
 - 后端：FastAPI + LangGraph
@@ -162,7 +162,7 @@ FastAPI
 ## 扩展
 
 - **换检索源**：在 `backend/app/agent/tools.py` 新增 `@tool`，按 arXiv 工具的结构返回 JSON 字符串；然后在 `graph.py` 的 `tools` 列表中加入它。
-- **改研究路线结构**：编辑 `backend/app/agent/prompts.py`。
+- **改阅读路线结构**：编辑 `backend/app/agent/prompts.py`。
 - **换持久化**：把 `MemorySaver` 换成 SQLite/Postgres checkpointer，并把 `ConversationStore` 换成数据库表。`thread_id` 契约不变，前端无需改动。
 
 ## 部署到 Qoder Sites（方案 A：保留 Python）

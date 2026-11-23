@@ -60,8 +60,13 @@ class ConversationStore:
             return None
         return self._threads.get(thread_id)
 
-    def append_user(self, record: ThreadRecord, content: str) -> None:
-        record.messages.append({"role": "user", "content": content})
+    def append_user(
+        self, record: ThreadRecord, content: str, profile: Optional[dict] = None
+    ) -> None:
+        message = {"role": "user", "content": content}
+        if profile:
+            message["profile"] = profile
+        record.messages.append(message)
         record.updated_at = _now()
 
     def append_assistant(

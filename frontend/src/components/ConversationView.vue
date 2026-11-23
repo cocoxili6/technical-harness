@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import type { ChatMessage } from "../types";
+import { ref } from "vue";
+import type { ChatMessage, Source } from "../types";
+import { profileTags } from "../lib/profile";
 import MarkdownBody from "./MarkdownBody.vue";
+import PaperPanel from "./PaperPanel.vue";
 import SourceList from "./SourceList.vue";
 import ToolTrace from "./ToolTrace.vue";
 
@@ -8,6 +11,8 @@ defineProps<{
   messages: ChatMessage[];
   streaming: boolean;
 }>();
+
+const active = ref<Source | null>(null);
 </script>
 
 <template>
@@ -16,6 +21,14 @@ defineProps<{
       <section v-if="message.role === 'user'" class="question">
         <div class="question-label">研究问题</div>
         <p class="question-text">{{ message.content }}</p>
+        <p v-if="profileTags(message.profile).length" class="question-profile">
+          <span
+            v-for="tag in profileTags(message.profile)"
+            :key="tag"
+            class="profile-tag"
+            >{{ tag }}</span
+          >
+        </p>
       </section>
 
       <article v-else class="note">
@@ -50,6 +63,8 @@ defineProps<{
           v-if="message.content"
           :content="message.content"
           :streaming="message.status === 'streaming'"
+          :sources="message.sources"
+          @analyze="active = $event"
         />
 
         <div
@@ -61,9 +76,15 @@ defineProps<{
           <p>{{ message.error || "生成失败，请重试。" }}</p>
         </div>
 
-        <SourceList v-if="message.sources?.length" :sources="message.sources" />
+        <SourceList
+          v-if="message.sources?.length"
+          :sources="message.sources"
+          :content="message.content"
+          @analyze="active = $event"
+        />
       </article>
     </template>
+    <PaperPanel v-if="active" :source="active" @close="active = null" />
   </div>
 </template>
 
@@ -108,6 +129,22 @@ defineProps<{
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.question-profile {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.profile-tag {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--ink-soft);
 }
 
 .note {

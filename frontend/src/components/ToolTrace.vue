@@ -6,6 +6,7 @@ defineProps<{ items: TraceItem[] }>();
 function toolLabel(name: string): string {
   if (name === "search_arxiv") return "arXiv 检索";
   if (name === "search_scholar") return "Google Scholar 检索";
+  if (name === "search_openalex") return "OpenAlex 检索";
   return name;
 }
 </script>

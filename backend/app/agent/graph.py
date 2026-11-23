@@ -10,7 +10,7 @@ from langgraph.prebuilt import ToolNode
 
 from ..config import Settings
 from .prompts import build_system_prompt
-from .tools import search_arxiv, search_scholar
+from .tools import search_arxiv, search_openalex, search_scholar
 
 
 class AgentState(TypedDict):
@@ -27,7 +27,9 @@ def build_agent(settings: Settings):
         max_retries=1,
         timeout=60,
     )
-    tools = [search_arxiv, search_scholar] if settings.scholar_configured else [search_arxiv]
+    tools = [search_arxiv, search_openalex]
+    if settings.scholar_configured:
+        tools.append(search_scholar)
     model_with_tools = llm.bind_tools(tools)
 
     async def assistant(state: AgentState, config: RunnableConfig) -> dict:

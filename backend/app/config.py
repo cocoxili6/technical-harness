@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     arxiv_endpoint: str = "https://export.arxiv.org/api/query"
     serper_api_key: str = ""
     serper_scholar_endpoint: str = "https://google.serper.dev/scholar"
+    openalex_endpoint: str = "https://api.openalex.org/works"
+    openalex_api_key: str = ""
 
     @property
     def llm_configured(self) -> bool:

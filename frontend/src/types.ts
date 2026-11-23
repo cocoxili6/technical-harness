@@ -24,6 +24,25 @@ export interface Source {
   summary: string;
 }
 
+export interface LearningProfile {
+  background?: "none" | "course" | "research";
+  goal?: "overview" | "project" | "research";
+  weekly_hours?: number;
+  preference?: "survey" | "classic" | "recent";
+}
+
+export interface PaperAnalysis {
+  research_problem: string;
+  method: string;
+  contributions: string[];
+  limitations: string[];
+  prerequisites: string[];
+  difficulty: "入门" | "中等" | "较难";
+  difficulty_reason: string;
+  reading_time: string;
+  paper_type: "综述" | "方法" | "实证" | "理论" | "系统" | "其他";
+}
+
 export type ToolStatus = "running" | "done" | "error";
 
 export interface TraceItem {
@@ -41,6 +60,7 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  profile?: LearningProfile;
   sources?: Source[];
   trace?: TraceItem[];
   status?: MessageStatus;
@@ -54,6 +74,7 @@ export interface ThreadDetail {
   messages: Array<{
     role: "user" | "assistant";
     content: string;
+    profile?: LearningProfile;
     sources?: Source[];
     trace?: TraceItem[];
   }>;

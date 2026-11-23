@@ -11,10 +11,12 @@ import ResearchComposer from "./components/ResearchComposer.vue";
 import Sidebar from "./components/Sidebar.vue";
 import { getHealth, getThread, listThreads, streamChat } from "./lib/api";
 import { createId } from "./lib/format";
+import { isEmptyProfile } from "./lib/profile";
 import type {
   BackendState,
   ChatMessage,
   Health,
+  LearningProfile,
   StatusTone,
   ThreadSummary,
 } from "./types";
@@ -22,7 +24,7 @@ import type {
 const ACTIVE_KEY = "yantu.activeThread";
 
 const starters = [
-  "多智能体强化学习中的信用分配，有哪些主流路线？",
+  "我学过机器学习基础，想入门联邦学习隐私保护，每周能读 6 小时论文，帮我排一条阅读路线。",
   "扩散策略在机器人操作中的研究现状如何？",
   "如何为一篇 RL 论文设计可信的消融实验？",
 ];
@@ -35,6 +37,7 @@ const activeTitle = ref("");
 const messages = ref<ChatMessage[]>([]);
 const streaming = ref(false);
 const draft = ref("");
+const profile = ref<LearningProfile>({});
 const mobileSidebarOpen = ref(false);
 const loadError = ref("");
 const scrollEl = ref<HTMLElement | null>(null);
@@ -150,6 +153,7 @@ async function openThread(threadId: string, silent = false): Promise<void> {
       id: createId(),
       role: message.role,
       content: message.content,
+      profile: message.profile,
       sources: message.sources ?? [],
       trace: message.trace ?? [],
       status: "done" as const,
@@ -222,10 +226,14 @@ async function send(text: string): Promise<void> {
   const run = ++generation;
   const isCurrent = () => run === generation;
 
+  const sentProfile = isEmptyProfile(profile.value)
+    ? undefined
+    : { ...profile.value };
   messages.value.push({
     id: createId(),
     role: "user",
     content: text,
+    profile: sentProfile,
     status: "done",
   });
   messages.value.push({
@@ -248,7 +256,11 @@ async function send(text: string): Promise<void> {
 
   try {
     await streamChat(
-      { message: text, thread_id: activeThreadId.value ?? undefined },
+      {
+        message: text,
+        thread_id: activeThreadId.value ?? undefined,
+        profile: sentProfile,
+      },
       {
         onMeta: (meta) => {
           if (!isCurrent()) return;
@@ -454,16 +466,17 @@ onBeforeUnmount(() => {
             </div>
             <h1 class="hero-title">
               把一个模糊的兴趣，<br />
-              变成一条<span class="mark">研究路线</span>。
+              变成一条<span class="mark">阅读路线</span>。
             </h1>
             <p class="hero-sub">
-              输入研究方向或具体问题。智能体会检索 arXiv
-              文献、梳理方法脉络，并给出分阶段的研究建议与下一步动作。
+              输入研究方向，也可以说说你的基础、目标和每周能投入的时间。智能体会检索
+              arXiv 与 OpenAlex 的真实文献，按入门、基础、进阶、前沿四个阶段排好阅读顺序。
             </p>
 
             <ResearchComposer
               ref="composerRef"
               v-model="draft"
+              v-model:profile="profile"
               variant="hero"
               :streaming="streaming"
               :disabled="!backendReady"
@@ -507,6 +520,7 @@ onBeforeUnmount(() => {
           <ResearchComposer
             ref="composerRef"
             v-model="draft"
+            v-model:profile="profile"
             variant="docked"
             :streaming="streaming"
             :disabled="!backendReady"

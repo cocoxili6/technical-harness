@@ -1,4 +1,11 @@
-import type { Health, Source, ThreadDetail, ThreadSummary } from "../types";
+import type {
+  Health,
+  LearningProfile,
+  PaperAnalysis,
+  Source,
+  ThreadDetail,
+  ThreadSummary,
+} from "../types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
 
@@ -17,9 +24,10 @@ async function errorFromResponse(response: Response): Promise<Error> {
   return new Error(message);
 }
 
-async function requestJson<T>(path: string): Promise<T> {
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { Accept: "application/json" },
+    ...init,
+    headers: { Accept: "application/json", ...init?.headers },
   });
   if (!response.ok) {
     throw await errorFromResponse(response);
@@ -37,6 +45,26 @@ export function listThreads(): Promise<{ threads: ThreadSummary[] }> {
 
 export function getThread(threadId: string): Promise<ThreadDetail> {
   return requestJson<ThreadDetail>(`/api/threads/${encodeURIComponent(threadId)}`);
+}
+
+export function analyzePaper(
+  source: Source,
+): Promise<{ demo: boolean; analysis: PaperAnalysis }> {
+  return requestJson<{ demo: boolean; analysis: PaperAnalysis }>(
+    "/api/papers/analyze",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        title: source.title,
+        authors: source.authors,
+        year: source.year,
+        url: source.url,
+        category: source.category ?? "",
+        summary: source.summary,
+      }),
+    },
+  );
 }
 
 export interface StreamHandlers {
@@ -125,7 +153,7 @@ function dispatch(parsed: ParsedEvent, handlers: StreamHandlers): void {
 }
 
 export async function streamChat(
-  input: { message: string; thread_id?: string },
+  input: { message: string; thread_id?: string; profile?: LearningProfile },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {

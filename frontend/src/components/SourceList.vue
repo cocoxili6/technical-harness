@@ -1,41 +1,52 @@
 <script setup lang="ts">
+import { computed, ref } from "vue";
 import type { Source } from "../types";
 
-defineProps<{ sources: Source[] }>();
+const props = defineProps<{ sources: Source[]; content?: string }>();
+const emit = defineEmits<{ (e: "analyze", source: Source): void }>();
+
+const open = ref(false);
+
+function cited(source: Source): boolean {
+  const content = props.content ?? "";
+  if (content.includes(source.url)) return true;
+  const id = source.url.match(/10\.\d{4,}\/[^\s#?]+/)?.[0];
+  if (id && content.includes(id)) return true;
+  const arxiv = source.url.match(/arxiv\.org\/(?:abs|pdf)\/([\d.]+)/)?.[1];
+  return Boolean(arxiv && content.includes(arxiv));
+}
+
+const others = computed(() => props.sources.filter((source) => !cited(source)));
 </script>
 
 <template>
-  <section class="sources" aria-label="文献来源">
-    <div class="sources-head">
-      <h3>文献来源</h3>
-      <span>{{ sources.length }} 条</span>
-    </div>
-    <div class="source-grid">
-      <a
-        v-for="(source, index) in sources"
-        :key="source.url"
-        :href="source.url"
-        class="source-card"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
+  <section v-if="others.length" class="sources" aria-label="其他检索结果">
+    <button type="button" class="sources-head" @click="open = !open">
+      <h3>其他检索结果</h3>
+      <span>{{ others.length }} 条 · 阅读路线未选用</span>
+      <span class="toggle">{{ open ? "收起" : "展开" }}</span>
+    </button>
+    <div v-if="open" class="source-grid">
+      <article v-for="source in others" :key="source.url" class="source-card">
         <div class="source-top">
-          <span class="source-index">{{ String(index + 1).padStart(2, "0") }}</span>
           <span v-if="source.category === 'DEMO'" class="demo-tag">演示</span>
-          <svg
+          <a
             class="external-icon"
-            viewBox="0 0 16 16"
-            fill="none"
-            aria-hidden="true"
+            :href="source.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="查看原文"
           >
-            <path
-              d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10M9 2h5v5M14 2 7.5 8.5"
-              stroke="currentColor"
-              stroke-width="1.3"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10M9 2h5v5M14 2 7.5 8.5"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </a>
         </div>
         <h4>{{ source.title }}</h4>
         <p class="source-meta">
@@ -49,7 +60,10 @@ defineProps<{ sources: Source[] }>();
           >
         </p>
         <p v-if="source.summary" class="source-summary">{{ source.summary }}</p>
-      </a>
+        <button type="button" class="analyze-btn" @click="emit('analyze', source)">
+          分析这篇
+        </button>
+      </article>
     </div>
   </section>
 </template>
@@ -64,8 +78,14 @@ defineProps<{ sources: Source[] }>();
 .sources-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
   margin-bottom: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .sources-head h3 {
@@ -74,12 +94,18 @@ defineProps<{ sources: Source[] }>();
   font-size: 16px;
   font-weight: 600;
   letter-spacing: 0.04em;
+  color: var(--ink);
 }
 
 .sources-head span {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
+}
+
+.toggle {
+  margin-left: auto;
+  color: var(--accent) !important;
 }
 
 .source-grid {
@@ -97,30 +123,12 @@ defineProps<{ sources: Source[] }>();
   border: 1px solid var(--line);
   background: rgba(251, 248, 241, 0.62);
   color: var(--ink);
-  text-decoration: none;
-  transition:
-    border-color 160ms ease,
-    background-color 160ms ease,
-    transform 160ms ease;
-}
-
-.source-card:hover {
-  border-color: var(--accent);
-  background: var(--surface);
-  transform: translateY(-1px);
 }
 
 .source-top {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.source-index {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--accent);
-  letter-spacing: 0.08em;
 }
 
 .demo-tag {
@@ -137,10 +145,9 @@ defineProps<{ sources: Source[] }>();
   height: 13px;
   margin-left: auto;
   color: var(--muted);
-  transition: color 160ms ease;
 }
 
-.source-card:hover .external-icon {
+.external-icon:hover {
   color: var(--accent);
 }
 
@@ -189,6 +196,24 @@ defineProps<{ sources: Source[] }>();
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.analyze-btn {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 1px 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-soft);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 1.8;
+  cursor: pointer;
+}
+
+.analyze-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent-deep);
 }
 
 @media (max-width: 760px) {
