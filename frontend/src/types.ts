@@ -45,6 +45,31 @@ export interface PaperAnalysis {
 
 export type ToolStatus = "running" | "done" | "error";
 
+export interface MemoryItem {
+  id: string;
+  text: string;
+  kind: "interest" | "background" | "goal" | "preference" | "progress" | "fact" | string;
+  importance: number;
+  stability_days: number;
+  retention: number;
+  recall_count: number;
+  created_at: string;
+  last_recalled_at: string;
+  forgotten: boolean;
+  source: "auto" | "manual" | string;
+}
+
+export interface MemoryStats {
+  active: number;
+  forgotten: number;
+  avg_retention: number;
+}
+
+export interface MemorySnapshot {
+  items: MemoryItem[];
+  stats: MemoryStats;
+}
+
 export interface TraceItem {
   id: string;
   name: string;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { StatusTone, ThreadSummary } from "../types";
+import type { MemoryStats, StatusTone, ThreadSummary } from "../types";
 import { relativeTime } from "../lib/format";
 
 defineProps<{
@@ -9,6 +9,7 @@ defineProps<{
   turnCount: number;
   statusText: string;
   statusTone: StatusTone;
+  memoryStats: MemoryStats | null;
 }>();
 
 defineEmits<{
@@ -16,6 +17,7 @@ defineEmits<{
   (e: "select", id: string): void;
   (e: "close"): void;
   (e: "retry"): void;
+  (e: "memories"): void;
 }>();
 </script>
 
@@ -98,6 +100,23 @@ defineEmits<{
         </div>
         <p>上下文保存在后端进程内，服务重启后清空。</p>
       </div>
+
+      <button type="button" class="memory-card long-term" @click="$emit('memories')">
+        <div class="memory-head">
+          <span>长期记忆</span>
+          <span class="memory-link">查看 →</span>
+        </div>
+        <div class="memory-value">
+          {{ memoryStats ? `${memoryStats.active} 条活跃` : "尚未积累" }}
+        </div>
+        <p>
+          {{
+            memoryStats && memoryStats.forgotten
+              ? `另有 ${memoryStats.forgotten} 条已淡忘 · 按遗忘曲线衰减`
+              : "按遗忘曲线衰减，跨会话生效。"
+          }}
+        </p>
+      </button>
 
       <div class="status-line">
         <span class="status-dot" :class="statusTone" aria-hidden="true"></span>
@@ -340,6 +359,27 @@ defineEmits<{
   font-size: 10px;
   line-height: 1.65;
   color: var(--muted);
+}
+
+.memory-card.long-term {
+  display: block;
+  width: 100%;
+  font-family: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.memory-card.long-term:hover {
+  border-color: var(--accent);
+  background: rgba(251, 248, 241, 0.86);
+}
+
+.memory-link {
+  color: var(--accent);
 }
 
 .status-line {

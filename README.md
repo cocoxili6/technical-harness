@@ -5,7 +5,7 @@
 - 前端：Vue 3 + Vite + TypeScript
 - 后端：FastAPI + LangGraph
 - 模型：DeepSeek（OpenAI 兼容接口）
-- 交互：SSE 流式输出、检索轨迹、来源卡片、多轮短期记忆、刷新恢复会话
+- 交互：SSE 流式输出、检索轨迹、来源卡片、多轮短期记忆、按 token 预算滚动压缩的上下文、按遗忘曲线衰减的长期记忆、刷新恢复会话
 
 当前仓库是**本地可运行脚手架**，尚未发布到 Qoder Sites。未配置模型 Key 时自动进入演示模式，界面上的示例内容会明确标注。
 
@@ -17,9 +17,11 @@ backend/
     main.py              FastAPI 入口、SSE 协议、会话接口
     config.py            环境配置
     store.py             会话元数据 + 界面消息投影（进程内）
+    memory.py            长期记忆：遗忘曲线、持久化、自动抽取
     demo.py              未配置 Key 时的演示流
     agent/
-      graph.py           LangGraph: assistant <-> ToolNode
+      graph.py           LangGraph: prepare_context -> assistant <-> ToolNode
+      compact.py         上下文管理：论文清单、工具结果归档、滚动摘要
       tools.py           arXiv / Google Scholar 检索工具
       prompts.py         研究向导系统提示词
   requirements.txt
@@ -105,6 +107,17 @@ SERPER_API_KEY=你的Key
 
 启用后智能体多一个 `search_scholar` 工具：适合期刊/会议论文、综述和按引用量判断影响力；arXiv 工具继续负责最新预印本。每次调用消耗 1 次 Serper 查询额度，最多返回 8 条结果。未配置 Key 时该工具不会暴露给模型，其余功能不受影响。
 
+## 长期记忆（遗忘曲线）
+
+侧栏「长期记忆」卡片打开管理面板。记忆跨会话、跨重启生效，存放在 `backend/data/memories.json`（可用 `MEMORY_FILE` 改路径）。
+
+- **写入**：每轮真实对话结束后，后台让 DeepSeek 抽取 0-3 条关于用户的稳定信息；按科研辅导场景分类：知识基础、学习偏好、方向兴趣、方向目标、阅读/复现进展、工具事实。目标和进展必须绑定具体方向，泛化目标（了解全景/找问题）由界面画像承担，不重复记录；相似记忆自动合并，也可在面板里手动添加。
+- **衰减**：每条记忆有稳定度 S（天），强度 `R = e^(−t/S)`，t 为距上次回想的天数。初始 S = `(3 + 3 × 重要度) × 类别系数`：背景/偏好 1.5，兴趣 1.2，目标/事实 1.0，进展 0.6；进展类无论 S 多高，90 天未更新即视为淡忘。
+- **强化**：记忆被当前问题命中、或面板里点「复习」，`S ← S × (1 + 1.5 × (1 − R)) + 0.5`，即越接近遗忘时复习，间隔拉得越长（间隔重复）。
+- **淡忘**：`R < 10%` 视为淡忘，不再注入回答；面板可恢复（强度回到 100%）或删除。最多保留 300 条，超出时优先淘汰最弱的淡忘记忆。
+- **注入（两层）**：稳定画像层（知识基础/学习偏好）每轮常驻，按类别取最强条目拼成 ≤120 字摘要；情景层（兴趣/目标/进展/事实）只注入与当前方向相关的记忆，检索时拼接会话主题与当前问题，最多 5 条、合计 ≤600 字。画像层不会因为常驻展示而强化，只有问题命中才触发强化。
+- 演示模式没有 LLM，自动抽取与记忆注入都不运行，面板仍可手动添加、复习和删除。
+
 ## 架构
 
 ```text
@@ -113,15 +126,25 @@ Vue 工作台
   ▼
 FastAPI
   │
-  ├─ LangGraph: assistant ──▶ ToolNode(search_arxiv / search_scholar) ──▶ assistant
-  │     MemorySaver(thread_id)            arXiv API
+  ├─ LangGraph: prepare_context -> assistant ──▶ ToolNode(search_arxiv / search_openalex / search_scholar) ──▶ prepare_context
+  │     MemorySaver(thread_id)            arXiv / OpenAlex / Serper API
   │
   └─ ConversationStore: 用户/助手消息、检索轨迹、来源卡片
 ```
 
-- **LLM 短期记忆**：LangGraph `MemorySaver` 按 `thread_id` 保存完整消息序列，工具结果也会进入上下文。
+- **LLM 短期记忆**：LangGraph `MemorySaver` 按 `thread_id` 保存消息序列。上下文由 `prepare_context` 节点管理，按 token 预算滚动压缩，详见下一节。
+- **长期记忆**：`MemoryStore` 抽取用户画像类信息并按遗忘曲线衰减，相关记忆在每轮对话前注入消息，详见上一节。
 - **界面恢复**：`ConversationStore` 额外保存一份界面投影（含检索轨迹和来源），刷新页面后可以通过 `/api/threads/{id}` 恢复。
-- **生命周期**：两者都在后端进程内，服务重启即清空；前端只在 `localStorage` 记住当前会话 ID。
+- **生命周期**：短期记忆在后端进程内，服务重启即清空；长期记忆在磁盘，重启后保留。前端只在 `localStorage` 记住当前会话 ID。
+
+### 上下文管理
+
+窗口是不可能无限增长的工作台，所以上下文按用途分三层管理，超出预算时压缩而不是报错。
+
+- **论文清单 `paper_catalog`**：每条工具结果中的论文按 URL 去重后由代码写入结构化清单（标题、链接、年份、出处、引用量）。清单跨轮持久，引用论文时标题和链接只能取自这里，避免压缩后编造链接，也避免重复推荐。每轮注入最近 `CONTEXT_CATALOG_LIMIT` 篇。
+- **工具结果归档**：最后一条用户消息之前的历史工具结果，从下一轮开始替换为一行占位符（工具名、关键词、命中数），完整原文不再进入上下文；当轮和第 0 级裁剪时保持原样，便于模型综合本轮检索。归档按消息 id 原地替换，`tool_call_id` 配对不变。
+- **滚动摘要**：进入新一轮用户消息时估算总 token（system + 纪要 + 清单 + 历史），超过 `CONTEXT_TOKEN_BUDGET` 就把倒数第 `CONTEXT_KEEP_TURNS` 轮之前的消息交给非流式模型压缩成纪要（进展 / 已确定 / 待办），再用 `RemoveMessage` 删除原文。摘要失败时降级为少删一轮，不影响回答。摘要调用带 `context-compaction` 标签，SSE 层按标签过滤，不会混入回答。
+- **缓存与顺序**：工具循环内不归档、不压缩，保持前缀稳定以命中 DeepSeek 的自动 KV 缓存；静态 system、纪要、清单分为三条 `SystemMessage`，静态前缀在前，压缩时只改后面的动态部分。
 
 ### SSE 事件
 
@@ -143,6 +166,10 @@ FastAPI
 - `GET /api/threads`：会话列表
 - `GET /api/threads/{thread_id}`：会话消息（含轨迹与来源）
 - `POST /api/chat/stream`：`{ "message": "...", "thread_id": "可选" }`
+- `GET /api/memories`：长期记忆列表（含强度、稳定度、是否淡忘）
+- `POST /api/memories`：`{ "text": "..." }` 手动添加记忆
+- `POST /api/memories/{id}/review`：复习一条记忆（强化稳定度）
+- `DELETE /api/memories/{id}`：删除一条记忆
 
 ## 配置项
 
@@ -155,6 +182,10 @@ FastAPI
 | `ARXIV_ENDPOINT` | `https://export.arxiv.org/api/query` | 文献检索端点 |
 | `SERPER_API_KEY` | 空 | 为空时智能体只有 arXiv 工具；填入后启用 Google Scholar 检索 |
 | `CORS_ORIGINS` | 本地 5173 | 逗号分隔；使用 Edge Function 代理时浏览器不跨域 |
+| `MEMORY_FILE` | `data/memories.json` | 长期记忆存储路径（相对 `backend/`） |
+| `CONTEXT_TOKEN_BUDGET` | `28000` | 上下文预算（估算 token），超限触发滚动摘要 |
+| `CONTEXT_KEEP_TURNS` | `2` | 压缩时保留最近几轮原文 |
+| `CONTEXT_CATALOG_LIMIT` | `40` | 每轮注入论文清单的最大条数 |
 | `HARNESS_SHARED_TOKEN` | 空 | 后端侧共享令牌；为空表示不校验 |
 
 `HARNESS_SHARED_TOKEN` 与 Edge Function 配合使用。本地经 Vite 代理直连后端时保持为空，否则请求会 401。
@@ -163,7 +194,7 @@ FastAPI
 
 - **换检索源**：在 `backend/app/agent/tools.py` 新增 `@tool`，按 arXiv 工具的结构返回 JSON 字符串；然后在 `graph.py` 的 `tools` 列表中加入它。
 - **改阅读路线结构**：编辑 `backend/app/agent/prompts.py`。
-- **换持久化**：把 `MemorySaver` 换成 SQLite/Postgres checkpointer，并把 `ConversationStore` 换成数据库表。`thread_id` 契约不变，前端无需改动。
+- **换持久化**：把 `MemorySaver` 换成 SQLite/Postgres checkpointer，并把 `ConversationStore` 换成数据库表；长期记忆同理可把 `backend/app/memory.py` 的 JSON 存储换成数据库。<`thread_id` 契约不变，前端无需改动。
 
 ## 部署到 Qoder Sites（方案 A：保留 Python）
 
@@ -191,7 +222,7 @@ CORS_ORIGINS=https://你的站点域名
 
 ### 2. 配置 Edge Function
 
-`functions/app/index.ts` 已实现白名单代理：`/api/health`、`/api/threads`、`/api/threads/{id}`、`/api/chat/stream`。它不暴露任意上游，也不把令牌返回给浏览器。
+`functions/app/index.ts` 已实现白名单代理：`/api/health`、`/api/threads`、`/api/threads/{id}`、`/api/chat/stream`、`/api/memories`（含复习与删除）。它不暴露任意上游，也不把令牌返回给浏览器。
 
 在 Qoder Sites 中为该 Function 声明并配置两个 Secret：
 
@@ -231,6 +262,10 @@ VITE_API_BASE=/functions/v1/app npm run build
 | 会话切换与刷新恢复 | 通过：两轮消息、来源、检索轨迹均可恢复 |
 | 真实分支（OpenAI 兼容 mock，非 DeepSeek） | 通过：22 个 token 事件、工具调用、2 个来源、两轮上下文（模型侧消息数 6 → 8）、刷新后轨迹恢复 |
 | Google Scholar 工具（mock Serper + mock DeepSeek 全链路） | 通过：24 项单元检查；`search_scholar` 工具调用、2 张来源卡片（出处/年份回填）、会话持久化；浏览器 UI 验证通过（顶栏检索源、轨迹标签、来源卡片）；真实 Serper 接口待 Key |
+| 长期记忆（遗忘曲线 + 持久化） | 通过：单元检查（相似合并、相关检索、30 天衰减 R=0.08 判定淡忘、复习复活、重载持久化）；API 增删查复习；浏览器面板添加/复习/删除、活跃与淡忘分组、侧栏计数同步；后端重启后记忆保留 |
+| 长期记忆两层注入 | 通过：画像层仅含知识基础/学习偏好且常驻（≤120 字）、情景层含兴趣/目标/进展/事实并仅注入方向相关问题（≤5 条 / ≤600 字）、会话主题参与检索（追问不丢方向）、无关情景不注入、类别衰减系数与进展 90 天过期生效 |
+| 长期记忆自动抽取（DeepSeek） | 未验证：抽取逻辑已接入，等待 API Key 实测 |
+| 上下文管理（归档 + 滚动摘要，2026-11-23） | 通过：59 项离线检查（38 项模块单测：估算/去重/归档/切点/降级/纪要渲染；21 项图级集成：工具循环→清单→归档→压缩→纪要注入、裁剪后工具调用配对完整）；真实 DeepSeek 长对话待 Key |
 | DeepSeek 官方接口 | 未验证：等待你提供 API Key |
 | Qoder Sites Edge 代理 | 未验证：未部署；本机未安装 Deno，未执行 `deno check` |
 | 前端类型检查 / 生产构建 | 通过 |

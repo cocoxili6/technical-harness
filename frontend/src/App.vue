@@ -7,9 +7,10 @@ import {
   ref,
 } from "vue";
 import ConversationView from "./components/ConversationView.vue";
+import MemoryPanel from "./components/MemoryPanel.vue";
 import ResearchComposer from "./components/ResearchComposer.vue";
 import Sidebar from "./components/Sidebar.vue";
-import { getHealth, getThread, listThreads, streamChat } from "./lib/api";
+import { getHealth, getThread, listMemories, listThreads, streamChat } from "./lib/api";
 import { createId } from "./lib/format";
 import { isEmptyProfile } from "./lib/profile";
 import type {
@@ -17,6 +18,7 @@ import type {
   ChatMessage,
   Health,
   LearningProfile,
+  MemoryStats,
   StatusTone,
   ThreadSummary,
 } from "./types";
@@ -38,6 +40,8 @@ const messages = ref<ChatMessage[]>([]);
 const streaming = ref(false);
 const draft = ref("");
 const profile = ref<LearningProfile>({});
+const memoryStats = ref<MemoryStats | null>(null);
+const memoriesOpen = ref(false);
 const mobileSidebarOpen = ref(false);
 const loadError = ref("");
 const scrollEl = ref<HTMLElement | null>(null);
@@ -83,7 +87,7 @@ const emptyFoot = computed(() => {
   if (isDemo.value) {
     return "当前为演示模式，回答是界面示例。配置 DeepSeek API Key 后会使用真实文献生成。";
   }
-  return "回答会流式生成 · 同一会话内保留上下文记忆";
+  return "回答会流式生成 · 会话内上下文 + 跨会话长期记忆";
 });
 
 function scrollToBottom(force = false): void {
@@ -120,8 +124,23 @@ async function refreshThreads(): Promise<void> {
   }
 }
 
+async function refreshMemoryStats(): Promise<void> {
+  if (!backendReady.value) return;
+  try {
+    const data = await listMemories();
+    memoryStats.value = data.stats;
+  } catch {
+    // memory panel surfaces load errors when opened
+  }
+}
+
 function closeSidebar(): void {
   mobileSidebarOpen.value = false;
+}
+
+function openMemories(): void {
+  memoriesOpen.value = true;
+  closeSidebar();
 }
 
 function stopStream(): void {
@@ -345,7 +364,11 @@ async function send(text: string): Promise<void> {
       controller = null;
       streaming.value = false;
     }
-    if (backendReady.value) void refreshThreads();
+    if (backendReady.value) {
+      void refreshThreads();
+      // 记忆抽取是后台任务，延迟一点再刷新侧栏统计
+      window.setTimeout(() => void refreshMemoryStats(), 2500);
+    }
     await nextTick();
     scrollToBottom();
   }
@@ -356,6 +379,7 @@ onMounted(async () => {
   if (backendReady.value) {
     await refreshThreads();
     await restoreThread();
+    void refreshMemoryStats();
   }
 });
 
@@ -375,10 +399,12 @@ onBeforeUnmount(() => {
       :turn-count="turnCount"
       :status-text="statusText"
       :status-tone="statusTone"
+      :memory-stats="memoryStats"
       @new="newThread"
       @select="openThread"
       @close="closeSidebar"
       @retry="reconnect"
+      @memories="openMemories"
     />
 
     <main class="main">
@@ -532,6 +558,12 @@ onBeforeUnmount(() => {
       </footer>
     </main>
   </div>
+
+  <MemoryPanel
+    v-if="memoriesOpen"
+    @close="memoriesOpen = false"
+    @changed="memoryStats = $event"
+  />
 </template>
 
 <style scoped>

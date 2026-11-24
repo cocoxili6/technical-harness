@@ -1,6 +1,7 @@
 import type {
   Health,
   LearningProfile,
+  MemorySnapshot,
   PaperAnalysis,
   Source,
   ThreadDetail,
@@ -64,6 +65,32 @@ export function analyzePaper(
         summary: source.summary,
       }),
     },
+  );
+}
+
+export function listMemories(): Promise<MemorySnapshot> {
+  return requestJson<MemorySnapshot>("/api/memories");
+}
+
+export function addMemory(text: string): Promise<MemorySnapshot> {
+  return requestJson<MemorySnapshot>("/api/memories", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function reviewMemory(memoryId: string): Promise<MemorySnapshot> {
+  return requestJson<MemorySnapshot>(
+    `/api/memories/${encodeURIComponent(memoryId)}/review`,
+    { method: "POST" },
+  );
+}
+
+export function deleteMemory(memoryId: string): Promise<MemorySnapshot> {
+  return requestJson<MemorySnapshot>(
+    `/api/memories/${encodeURIComponent(memoryId)}`,
+    { method: "DELETE" },
   );
 }
 

@@ -13,6 +13,7 @@ from .agent.analysis import PaperAnalyzer, PaperInput, demo_analysis
 from .agent.graph import build_agent
 from .config import get_settings
 from .demo import build_demo_reply, build_demo_sources
+from .memory import KIND_LABELS, MemoryStore
 from .store import ConversationStore, ThreadRecord
 
 logging.basicConfig(level=logging.INFO)
@@ -20,8 +21,16 @@ logger = logging.getLogger("harness")
 
 settings = get_settings()
 store = ConversationStore()
+memory_store = MemoryStore(settings)
 _agent = None
 _analyzer = None
+_background_tasks: set = set()
+
+
+def spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def get_analyzer():
@@ -50,7 +59,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -104,10 +113,42 @@ class ChatRequest(BaseModel):
     profile: Optional[LearningProfile] = None
 
 
-def message_for_agent(message: str, profile: Optional[LearningProfile]) -> str:
-    if profile is None or profile.is_empty():
+class MemoryCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=300)
+    kind: Literal["interest", "background", "goal", "preference", "progress", "fact"] = "fact"
+    importance: int = Field(default=3, ge=1, le=5)
+
+
+def message_for_agent(
+    message: str,
+    profile: Optional[LearningProfile],
+    memory_context: Optional[dict] = None,
+) -> str:
+    blocks = []
+    if profile is not None and not profile.is_empty():
+        blocks.append(f"【学习画像】（用户在界面上选择）\n{profile.describe()}")
+    if memory_context:
+        lines = []
+        summary = str(memory_context.get("summary") or "")
+        episodic = memory_context.get("episodic") or []
+        if summary:
+            lines.append(f"稳定画像（常驻）：{summary}")
+        if episodic:
+            if lines:
+                lines.append("与当前问题相关的情景：")
+            lines.extend(
+                f"- [{KIND_LABELS.get(item.kind, item.kind)}] {item.text}"
+                for item in episodic
+            )
+        if lines:
+            blocks.append(
+                "【长期记忆】（过去会话中关于用户的要点；只在相关时参考）\n"
+                + "\n".join(lines)
+            )
+    if not blocks:
         return message
-    return f"【学习画像】（用户在界面上选择）\n{profile.describe()}\n\n【问题】\n{message}"
+    blocks.append(f"【问题】\n{message}")
+    return "\n\n".join(blocks)
 
 
 def sse(event: str, data: dict) -> str:
@@ -222,16 +263,27 @@ async def live_stream(
     seen_urls = set()
     trace: List[dict] = []
 
+    memory_context = None
+    try:
+        # 拼接会话主题与当前问题检索：追问"接下来读什么"时也能命中方向相关的记忆
+        memory_context = memory_store.context_for(f"{record.title}\n{message}")
+    except Exception:
+        logger.exception("长期记忆检索失败（不影响本轮回答）")
+
     yield sse("meta", meta_payload(record, demo=False))
 
     try:
         async for event in agent.astream_events(
-            {"messages": [HumanMessage(content=message_for_agent(message, profile))]},
+            {"messages": [HumanMessage(content=message_for_agent(message, profile, memory_context))]},
             config=config,
             version="v2",
         ):
             if await request.is_disconnected():
                 return
+
+            # 上下文压缩的摘要调用不进入用户可见的事件流
+            if "context-compaction" in (event.get("tags") or []):
+                continue
 
             kind = event.get("event")
             if kind == "on_chat_model_start":
@@ -349,6 +401,14 @@ async def live_stream(
         return
 
     store.append_assistant(record, answer, sources, trace)
+    spawn_background(
+        memory_store.extract_and_remember(
+            message,
+            answer,
+            record.id,
+            profile.describe() if profile else "",
+        )
+    )
     yield sse("done", {"thread_id": record.id})
 
 
@@ -409,7 +469,10 @@ def health() -> dict:
         "search": "arXiv + OpenAlex + Google Scholar"
         if settings.scholar_configured
         else "arXiv + OpenAlex",
-        "memory": "in-process",
+        "memory": (
+            "short-term in-process with rolling summary · "
+            "long-term on disk (Ebbinghaus decay)"
+        ),
     }
 
 
@@ -469,6 +532,39 @@ async def analyze_paper(paper: PaperInput) -> dict:
         logger.exception("paper analysis failed")
         raise HTTPException(status_code=502, detail=friendly_error(exc)) from exc
     return {"demo": False, "cached": was_cached, "analysis": analysis.model_dump()}
+
+
+@router.get("/memories")
+def list_memories() -> dict:
+    return memory_store.snapshot()
+
+
+@router.post("/memories")
+def add_memory(payload: MemoryCreate) -> dict:
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="记忆内容不能为空")
+    memory_store.add(
+        text,
+        kind=payload.kind,
+        importance=payload.importance,
+        source="manual",
+    )
+    return memory_store.snapshot()
+
+
+@router.post("/memories/{memory_id}/review")
+def review_memory(memory_id: str) -> dict:
+    if not memory_store.review(memory_id):
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return memory_store.snapshot()
+
+
+@router.delete("/memories/{memory_id}")
+def delete_memory(memory_id: str) -> dict:
+    if not memory_store.delete(memory_id):
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return memory_store.snapshot()
 
 
 app.include_router(router)

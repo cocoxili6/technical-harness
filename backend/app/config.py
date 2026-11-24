@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     serper_scholar_endpoint: str = "https://google.serper.dev/scholar"
     openalex_endpoint: str = "https://api.openalex.org/works"
     openalex_api_key: str = ""
+    memory_file: str = "data/memories.json"
+    context_token_budget: int = 28000
+    context_keep_turns: int = 2
+    context_catalog_limit: int = 40
 
     @property
     def llm_configured(self) -> bool:
