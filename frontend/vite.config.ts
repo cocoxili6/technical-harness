@@ -1,8 +1,14 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
   plugins: [vue()],
+  test: {
+    environment: "jsdom",
+    clearMocks: true,
+    restoreMocks: true,
+    setupFiles: ["./src/test-setup.ts"],
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,

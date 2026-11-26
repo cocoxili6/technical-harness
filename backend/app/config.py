@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,12 @@ class Settings(BaseSettings):
     deepseek_temperature: float = 0.3
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     harness_shared_token: str = ""
+    supabase_url: str = ""
+    supabase_jwt_issuer: str = ""
+    supabase_jwt_audience: str = "authenticated"
+    supabase_jwt_secret: SecretStr = SecretStr("")
+    supabase_jwks_url: str = ""
+    supabase_db_url: SecretStr = SecretStr("")
     arxiv_endpoint: str = "https://export.arxiv.org/api/query"
     serper_api_key: str = ""
     serper_scholar_endpoint: str = "https://google.serper.dev/scholar"
