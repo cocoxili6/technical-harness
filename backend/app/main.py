@@ -453,7 +453,7 @@ async def demo_stream(message: str, record: ThreadRecord, request: Request):
     yield sse("done", {"thread_id": record.id})
 
 
-@router.get("/health")
+@app.get("/api/health")
 def health() -> dict:
     return {
         "status": "ok",

@@ -41,8 +41,14 @@ def _jwks_client(url: str) -> jwt.PyJWKClient:
 def decode_user(token: str, settings: Settings) -> CurrentUser:
     try:
         if settings.supabase_jwks_url:
-            key = _jwks_client(settings.supabase_jwks_url).get_signing_key_from_jwt(token).key
-            algorithms = ["RS256"]
+            signing_key = _jwks_client(
+                settings.supabase_jwks_url
+            ).get_signing_key_from_jwt(token)
+            algorithm = signing_key.algorithm_name
+            if algorithm not in {"RS256", "ES256"}:
+                raise ValueError("Unsupported Supabase signing algorithm")
+            key = signing_key.key
+            algorithms = [algorithm]
         else:
             secret = settings.supabase_jwt_secret.get_secret_value()
             if not secret:
