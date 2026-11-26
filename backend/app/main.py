@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from .agent.analysis import PaperAnalyzer, PaperInput, demo_analysis
+from .auth import CurrentUser, get_current_user, verify_gateway_token
 from .agent.graph import build_agent
 from .config import get_settings
 from .demo import build_demo_reply, build_demo_sources
@@ -47,13 +48,6 @@ def get_agent():
     return _agent
 
 
-def verify_token(authorization: Optional[str] = Header(default=None)) -> None:
-    if not settings.harness_shared_token:
-        return
-    if authorization != f"Bearer {settings.harness_shared_token}":
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -63,7 +57,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-router = APIRouter(prefix="/api", dependencies=[Depends(verify_token)])
+router = APIRouter(prefix="/api", dependencies=[Depends(verify_gateway_token)])
 
 
 PROFILE_LABELS = {
@@ -477,12 +471,12 @@ def health() -> dict:
 
 
 @router.get("/threads")
-def list_threads() -> dict:
+def list_threads(user: CurrentUser = Depends(get_current_user)) -> dict:
     return {"threads": store.summaries()}
 
 
 @router.get("/threads/{thread_id}")
-def get_thread(thread_id: str) -> dict:
+def get_thread(thread_id: str, user: CurrentUser = Depends(get_current_user)) -> dict:
     record = store.get(thread_id)
     if record is None:
         raise HTTPException(status_code=404, detail="会话不存在或已因服务重启被清除")
@@ -495,7 +489,11 @@ def get_thread(thread_id: str) -> dict:
 
 
 @router.post("/chat/stream")
-async def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
+async def chat_stream(
+    payload: ChatRequest,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> StreamingResponse:
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="message 不能为空")
@@ -519,7 +517,9 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
 
 
 @router.post("/papers/analyze")
-async def analyze_paper(paper: PaperInput) -> dict:
+async def analyze_paper(
+    paper: PaperInput, user: CurrentUser = Depends(get_current_user)
+) -> dict:
     analyzer = get_analyzer()
     if analyzer is None:
         return {"demo": True, "analysis": demo_analysis(paper).model_dump()}
@@ -535,12 +535,14 @@ async def analyze_paper(paper: PaperInput) -> dict:
 
 
 @router.get("/memories")
-def list_memories() -> dict:
+def list_memories(user: CurrentUser = Depends(get_current_user)) -> dict:
     return memory_store.snapshot()
 
 
 @router.post("/memories")
-def add_memory(payload: MemoryCreate) -> dict:
+def add_memory(
+    payload: MemoryCreate, user: CurrentUser = Depends(get_current_user)
+) -> dict:
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=422, detail="记忆内容不能为空")
@@ -554,14 +556,18 @@ def add_memory(payload: MemoryCreate) -> dict:
 
 
 @router.post("/memories/{memory_id}/review")
-def review_memory(memory_id: str) -> dict:
+def review_memory(
+    memory_id: str, user: CurrentUser = Depends(get_current_user)
+) -> dict:
     if not memory_store.review(memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在")
     return memory_store.snapshot()
 
 
 @router.delete("/memories/{memory_id}")
-def delete_memory(memory_id: str) -> dict:
+def delete_memory(
+    memory_id: str, user: CurrentUser = Depends(get_current_user)
+) -> dict:
     if not memory_store.delete(memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在")
     return memory_store.snapshot()
