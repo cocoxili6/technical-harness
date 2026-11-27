@@ -24,13 +24,17 @@ function fail(status: number, code: string, message: string): Response {
   return jsonResponse(status, { error: code, message });
 }
 
-Deno.serve(async (request: Request): Promise<Response> => {
+export async function handleRequest(
+  request: Request,
+  configuredBackendUrl: string,
+  sharedToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
   }
 
-  const backendUrl = (Deno.env.get("HARNESS_BACKEND_URL") ?? "").replace(/\/+$/, "");
-  const sharedToken = Deno.env.get("HARNESS_SHARED_TOKEN") ?? "";
+  const backendUrl = configuredBackendUrl.replace(/\/+$/, "");
 
   if (!backendUrl || !sharedToken) {
     return fail(503, "service_not_configured", "The harness backend is not configured.");
@@ -82,7 +86,11 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
   const upstreamHeaders = new Headers();
   upstreamHeaders.set("accept", request.headers.get("accept") ?? "*/*");
-  upstreamHeaders.set("authorization", `Bearer ${sharedToken}`);
+  const userAuthorization = request.headers.get("authorization");
+  if (userAuthorization) {
+    upstreamHeaders.set("authorization", userAuthorization);
+  }
+  upstreamHeaders.set("x-harness-gateway-token", sharedToken);
 
   let body: BodyInit | undefined;
 
@@ -144,7 +152,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${backendUrl}${apiPath}${requestUrl.search}`, {
+    upstream = await fetcher(`${backendUrl}${apiPath}${requestUrl.search}`, {
       method: request.method,
       headers: upstreamHeaders,
       body,
@@ -178,4 +186,12 @@ Deno.serve(async (request: Request): Promise<Response> => {
     status: upstream.status,
     headers: responseHeaders,
   });
-});
+}
+
+Deno.serve((request: Request) =>
+  handleRequest(
+    request,
+    Deno.env.get("HARNESS_BACKEND_URL") ?? "",
+    Deno.env.get("HARNESS_SHARED_TOKEN") ?? "",
+  )
+);
