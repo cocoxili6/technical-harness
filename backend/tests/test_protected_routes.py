@@ -3,7 +3,24 @@ from uuid import uuid4
 
 from app import main
 from app.auth import CurrentUser, get_current_user
-from app.main import app
+from app.main import app, get_user_db_session
+
+
+class Result:
+    def mappings(self):
+        return self
+
+    def all(self):
+        return []
+
+
+class Session:
+    async def execute(self, statement, params=None):
+        return Result()
+
+
+async def fake_user_db_session():
+    yield Session()
 
 
 def test_thread_list_requires_supabase_bearer_token():
@@ -17,6 +34,9 @@ def test_health_stays_public_when_gateway_token_is_configured(monkeypatch):
         app.dependency_overrides,
         get_current_user,
         lambda: CurrentUser(id=uuid4(), email="user@example.com"),
+    )
+    monkeypatch.setitem(
+        app.dependency_overrides, get_user_db_session, fake_user_db_session
     )
     client = TestClient(app)
 

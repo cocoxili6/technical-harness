@@ -1,8 +1,11 @@
 import asyncio
 import json
 import logging
+import math
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +17,10 @@ from .agent.analysis import PaperAnalyzer, PaperInput, demo_analysis
 from .auth import CurrentUser, get_current_user, verify_gateway_token
 from .agent.graph import build_agent
 from .config import get_settings
-from .db import dispose_engines
+from .db import dispose_engines, user_session
 from .demo import build_demo_reply, build_demo_sources
 from .memory import KIND_LABELS, MemoryStore
+from .repositories import ConversationRepository, MemoryRepository
 from .store import ConversationStore, ThreadRecord
 
 logging.basicConfig(level=logging.INFO)
@@ -57,6 +61,11 @@ async def app_lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=app_lifespan)
+
+
+async def get_user_db_session(user: CurrentUser = Depends(get_current_user)):
+    async with user_session(user.id) as session:
+        yield session
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -240,11 +249,55 @@ def event_headers() -> dict:
     }
 
 
+def memory_snapshot(rows: list[dict]) -> dict:
+    now = datetime.now(timezone.utc)
+    items = []
+    for row in rows:
+        last_recalled = row.get("last_recalled_at")
+        if isinstance(last_recalled, str):
+            try:
+                last_recalled = datetime.fromisoformat(last_recalled)
+            except ValueError:
+                last_recalled = now
+        if not isinstance(last_recalled, datetime):
+            last_recalled = now
+        if last_recalled.tzinfo is None:
+            last_recalled = last_recalled.replace(tzinfo=timezone.utc)
+        elapsed_days = max(0.0, (now - last_recalled).total_seconds() / 86400)
+        stability = max(float(row.get("stability") or 0.1), 0.1)
+        retention = math.exp(-elapsed_days / stability)
+        items.append({
+            "id": str(row["id"]),
+            "text": row["text"],
+            "kind": row["kind"],
+            "importance": row["importance"],
+            "stability_days": round(stability, 1),
+            "retention": round(retention, 3),
+            "recall_count": row.get("recall_count", 0),
+            "created_at": row.get("created_at"),
+            "last_recalled_at": row.get("last_recalled_at"),
+            "forgotten": retention < 0.1,
+            "source": row.get("source", "auto"),
+        })
+    active = [item for item in items if not item["forgotten"]]
+    average = sum(item["retention"] for item in active) / len(active) if active else 0
+    return {
+        "items": items,
+        "stats": {
+            "active": len(active),
+            "forgotten": len(items) - len(active),
+            "avg_retention": round(average, 3),
+        },
+    }
+
+
 async def live_stream(
     message: str,
     record: ThreadRecord,
     request: Request,
     profile: Optional[LearningProfile] = None,
+    conversation_repository: ConversationRepository | None = None,
+    user_id: UUID | None = None,
 ):
     try:
         agent = get_agent()
@@ -402,7 +455,15 @@ async def live_stream(
         yield sse("error", {"message": "模型没有返回内容，请重试。"})
         return
 
-    store.append_assistant(record, answer, sources, trace)
+    if conversation_repository is not None and user_id is not None:
+        await conversation_repository.append_message(
+            user_id,
+            UUID(record.id),
+            "assistant",
+            answer,
+            sources=sources,
+            trace=trace,
+        )
     spawn_background(
         memory_store.extract_and_remember(
             message,
@@ -414,7 +475,13 @@ async def live_stream(
     yield sse("done", {"thread_id": record.id})
 
 
-async def demo_stream(message: str, record: ThreadRecord, request: Request):
+async def demo_stream(
+    message: str,
+    record: ThreadRecord,
+    request: Request,
+    conversation_repository: ConversationRepository | None = None,
+    user_id: UUID | None = None,
+):
     trace_item = {
         "id": "demo-search",
         "name": "search_arxiv",
@@ -457,7 +524,15 @@ async def demo_stream(message: str, record: ThreadRecord, request: Request):
         yield sse("token", {"text": reply[start : start + 12]})
         await asyncio.sleep(0.016)
 
-    store.append_assistant(record, reply, items, [trace_item])
+    if conversation_repository is not None and user_id is not None:
+        await conversation_repository.append_message(
+            user_id,
+            UUID(record.id),
+            "assistant",
+            reply,
+            sources=items,
+            trace=[trace_item],
+        )
     yield sse("done", {"thread_id": record.id})
 
 
@@ -479,21 +554,29 @@ def health() -> dict:
 
 
 @router.get("/threads")
-def list_threads(user: CurrentUser = Depends(get_current_user)) -> dict:
-    return {"threads": store.summaries()}
+async def list_threads(
+    user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
+) -> dict:
+    return {"threads": await ConversationRepository(session).list_threads(user.id)}
 
 
 @router.get("/threads/{thread_id}")
-def get_thread(thread_id: str, user: CurrentUser = Depends(get_current_user)) -> dict:
-    record = store.get(thread_id)
+async def get_thread(
+    thread_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
+) -> dict:
+    try:
+        parsed_thread_id = UUID(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="thread not found") from exc
+    repository = ConversationRepository(session)
+    record = await repository.get_thread(user.id, parsed_thread_id)
     if record is None:
         raise HTTPException(status_code=404, detail="会话不存在或已因服务重启被清除")
-    return {
-        "id": record.id,
-        "title": record.title,
-        "created_at": record.created_at,
-        "messages": record.messages,
-    }
+    record["messages"] = await repository.list_messages(user.id, parsed_thread_id)
+    return record
 
 
 @router.post("/chat/stream")
@@ -501,23 +584,45 @@ async def chat_stream(
     payload: ChatRequest,
     request: Request,
     user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
 ) -> StreamingResponse:
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="message 不能为空")
 
-    record = store.get(payload.thread_id)
-    if record is None:
-        record = store.create_thread(message)
-    profile = payload.profile if payload.profile and not payload.profile.is_empty() else None
-    store.append_user(
-        record, message, profile.model_dump(exclude_none=True) if profile else None
+    repository = ConversationRepository(session)
+    if payload.thread_id:
+        try:
+            thread_id = UUID(payload.thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="thread not found") from exc
+        row = await repository.get_thread(user.id, thread_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+    else:
+        row = await repository.create_thread(user.id, message)
+        thread_id = UUID(str(row["id"]))
+
+    record = ThreadRecord(
+        id=str(thread_id),
+        title=str(row.get("title") or message[:28]),
+        created_at=str(row.get("created_at") or ""),
+        updated_at=str(row.get("updated_at") or ""),
     )
+    profile = payload.profile if payload.profile and not payload.profile.is_empty() else None
+    if await repository.append_message(
+        user.id,
+        thread_id,
+        "user",
+        message,
+        profile=profile.model_dump(exclude_none=True) if profile else None,
+    ) is None:
+        raise HTTPException(status_code=404, detail="thread not found")
 
     generator = (
-        demo_stream(message, record, request)
+        demo_stream(message, record, request, repository, user.id)
         if not settings.llm_configured
-        else live_stream(message, record, request, profile)
+        else live_stream(message, record, request, profile, repository, user.id)
     )
     return StreamingResponse(
         generator, media_type="text/event-stream", headers=event_headers()
@@ -543,42 +648,60 @@ async def analyze_paper(
 
 
 @router.get("/memories")
-def list_memories(user: CurrentUser = Depends(get_current_user)) -> dict:
-    return memory_store.snapshot()
+async def list_memories(
+    user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
+) -> dict:
+    memories = await MemoryRepository(session).list_memories(user.id)
+    return memory_snapshot(memories)
 
 
 @router.post("/memories")
-def add_memory(
-    payload: MemoryCreate, user: CurrentUser = Depends(get_current_user)
+async def add_memory(
+    payload: MemoryCreate,
+    user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
 ) -> dict:
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=422, detail="记忆内容不能为空")
-    memory_store.add(
-        text,
-        kind=payload.kind,
-        importance=payload.importance,
-        source="manual",
+    await MemoryRepository(session).create_memory(
+        user.id, text, payload.kind, payload.importance, stability=9, source="manual",
     )
-    return memory_store.snapshot()
+    memories = await MemoryRepository(session).list_memories(user.id)
+    return memory_snapshot(memories)
 
 
 @router.post("/memories/{memory_id}/review")
-def review_memory(
-    memory_id: str, user: CurrentUser = Depends(get_current_user)
+async def review_memory(
+    memory_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
 ) -> dict:
-    if not memory_store.review(memory_id):
+    try:
+        parsed_memory_id = UUID(memory_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    if not await MemoryRepository(session).review_memory(user.id, parsed_memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在")
-    return memory_store.snapshot()
+    memories = await MemoryRepository(session).list_memories(user.id)
+    return memory_snapshot(memories)
 
 
 @router.delete("/memories/{memory_id}")
-def delete_memory(
-    memory_id: str, user: CurrentUser = Depends(get_current_user)
+async def delete_memory(
+    memory_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    session=Depends(get_user_db_session),
 ) -> dict:
-    if not memory_store.delete(memory_id):
+    try:
+        parsed_memory_id = UUID(memory_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    if not await MemoryRepository(session).delete_memory(user.id, parsed_memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在")
-    return memory_store.snapshot()
+    memories = await MemoryRepository(session).list_memories(user.id)
+    return memory_snapshot(memories)
 
 
 app.include_router(router)

@@ -34,7 +34,7 @@
 Task 1: complete (commits 8375da4..e32228d, review approved after one fix round)
 Task 2: complete (commits e32228d..8aa0bf2, review clean after one fix round)
 Task 3: complete (RLS claims set in transaction as role authenticated plus explicit user predicates; repository append locking and pooled engine lifecycle reviewed)
-Task 4: pending
+Task 4: complete (thread/message and manual-memory routes use user-scoped database sessions; SSE writes persist user and assistant messages; response shape preserved)
 Task 5: pending
 Task 6: pending
 Task 7: pending
