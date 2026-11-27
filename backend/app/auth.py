@@ -4,7 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 import jwt
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 from .config import Settings, get_settings
 
@@ -26,9 +26,8 @@ def _bearer(value: Optional[str]) -> str:
 
 def verify_gateway_token(
     token: Optional[str] = Header(default=None, alias="x-harness-gateway-token"),
-    settings: Settings = None,
+    settings: Settings = Depends(get_settings),
 ) -> None:
-    settings = settings or get_settings()
     if settings.harness_shared_token and token != settings.harness_shared_token:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -70,7 +69,6 @@ def decode_user(token: str, settings: Settings) -> CurrentUser:
 
 def get_current_user(
     authorization: Optional[str] = Header(default=None),
-    settings: Settings = None,
+    settings: Settings = Depends(get_settings),
 ) -> CurrentUser:
-    settings = settings or get_settings()
     return decode_user(_bearer(authorization), settings)

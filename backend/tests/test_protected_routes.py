@@ -28,6 +28,19 @@ def test_thread_list_requires_supabase_bearer_token():
     assert response.status_code == 401
 
 
+def test_chat_request_body_is_flat_and_does_not_include_dependency_settings():
+    schema = TestClient(app).get("/openapi.json").json()
+    request_schema = schema["paths"]["/api/chat/stream"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    body_schema = schema["components"]["schemas"].get(
+        request_schema.get("$ref", "").rsplit("/", 1)[-1],
+        request_schema,
+    )
+
+    assert "payload" not in body_schema.get("properties", {})
+    assert "settings" not in body_schema.get("properties", {})
+    assert "message" in body_schema.get("properties", {})
+
+
 def test_health_stays_public_when_gateway_token_is_configured(monkeypatch):
     monkeypatch.setattr(main.settings, "harness_shared_token", "gateway-secret")
     monkeypatch.setitem(
