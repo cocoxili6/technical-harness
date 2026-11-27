@@ -13,6 +13,7 @@ from app.config import Settings
 
 def settings():
     return Settings(
+        _env_file=None,
         supabase_jwt_secret="test-secret-012345678901234567890",
         supabase_jwt_issuer="https://example.supabase.co/auth/v1",
         supabase_jwt_audience="authenticated",
@@ -83,6 +84,7 @@ def test_jwks_verification_accepts_es256_signing_key(monkeypatch):
 
     monkeypatch.setattr("app.auth._jwks_client", lambda url: FakeJwksClient())
     jwks_settings = Settings(
+        _env_file=None,
         supabase_jwks_url="https://example.supabase.co/auth/v1/.well-known/jwks.json",
         supabase_jwt_issuer="https://example.supabase.co/auth/v1",
         supabase_jwt_audience="authenticated",
@@ -121,6 +123,7 @@ def test_jwks_verification_rejects_unsupported_key_algorithm(monkeypatch):
 
     monkeypatch.setattr("app.auth._jwks_client", lambda url: FakeJwksClient())
     jwks_settings = Settings(
+        _env_file=None,
         supabase_jwks_url="https://example.supabase.co/auth/v1/.well-known/jwks.json",
         supabase_jwt_issuer="https://example.supabase.co/auth/v1",
         supabase_jwt_audience="authenticated",

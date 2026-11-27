@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-import math
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
@@ -10,27 +10,32 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from .agent.analysis import PaperAnalyzer, PaperInput, demo_analysis
 from .auth import CurrentUser, get_current_user, verify_gateway_token
 from .agent.graph import build_agent
 from .config import get_settings
-from .db import dispose_engines, user_session
+from .db import dispose_engines, get_checkpointer, initialize_checkpointer, user_session
 from .demo import build_demo_reply, build_demo_sources
-from .memory import KIND_LABELS, MemoryStore
-from .repositories import ConversationRepository, MemoryRepository
-from .store import ConversationStore, ThreadRecord
+from .memory import (
+    EXTRACTION_PROMPT,
+    KIND_LABELS,
+    MemoryItem,
+    MemoryStore,
+    _initial_stability,
+)
+from .repositories import AgentContextRepository, ConversationRepository, MemoryRepository
+from .store import ThreadRecord
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("harness")
 
 settings = get_settings()
-store = ConversationStore()
-memory_store = MemoryStore(settings)
 _agent = None
 _analyzer = None
+_memory_llm = None
 _background_tasks: set = set()
 
 
@@ -50,14 +55,18 @@ def get_analyzer():
 def get_agent():
     global _agent
     if _agent is None and settings.llm_configured:
-        _agent = build_agent(settings)
+        _agent = build_agent(settings, checkpointer=get_checkpointer())
     return _agent
 
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
-    yield
-    await dispose_engines()
+    try:
+        if settings.supabase_db_url.get_secret_value():
+            await initialize_checkpointer()
+        yield
+    finally:
+        await dispose_engines()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=app_lifespan)
@@ -170,6 +179,16 @@ def meta_payload(record: ThreadRecord, demo: bool) -> dict:
     return {"thread_id": record.id, "title": record.title, "demo": demo}
 
 
+def graph_config(user_id: UUID, thread_id: UUID) -> dict:
+    return {
+        "configurable": {
+            "thread_id": str(thread_id),
+            "checkpoint_ns": f"user:{user_id}",
+        },
+        "recursion_limit": 14,
+    }
+
+
 def text_from_chunk(chunk) -> str:
     content = getattr(chunk, "content", "")
     if isinstance(content, str):
@@ -263,22 +282,19 @@ def memory_snapshot(rows: list[dict]) -> dict:
             last_recalled = now
         if last_recalled.tzinfo is None:
             last_recalled = last_recalled.replace(tzinfo=timezone.utc)
-        elapsed_days = max(0.0, (now - last_recalled).total_seconds() / 86400)
-        stability = max(float(row.get("stability") or 0.1), 0.1)
-        retention = math.exp(-elapsed_days / stability)
-        items.append({
-            "id": str(row["id"]),
-            "text": row["text"],
-            "kind": row["kind"],
-            "importance": row["importance"],
-            "stability_days": round(stability, 1),
-            "retention": round(retention, 3),
-            "recall_count": row.get("recall_count", 0),
-            "created_at": row.get("created_at"),
-            "last_recalled_at": row.get("last_recalled_at"),
-            "forgotten": retention < 0.1,
-            "source": row.get("source", "auto"),
-        })
+        memory = MemoryItem(
+            id=str(row["id"]),
+            text=row["text"],
+            kind=row["kind"],
+            importance=row["importance"],
+            stability=float(row.get("stability") or 0.1),
+            created_at=str(row.get("created_at") or now.isoformat()),
+            last_recalled_at=last_recalled.isoformat(),
+            recall_count=row.get("recall_count", 0),
+            source=row.get("source", "auto"),
+            thread_id=str(row.get("thread_id") or ""),
+        )
+        items.append(memory.public(now))
     active = [item for item in items if not item["forgotten"]]
     average = sum(item["retention"] for item in active) / len(active) if active else 0
     return {
@@ -296,7 +312,6 @@ async def live_stream(
     record: ThreadRecord,
     request: Request,
     profile: Optional[LearningProfile] = None,
-    conversation_repository: ConversationRepository | None = None,
     user_id: UUID | None = None,
 ):
     try:
@@ -310,7 +325,10 @@ async def live_stream(
         yield sse("error", {"message": "模型未配置，请先设置 DEEPSEEK_API_KEY。"})
         return
 
-    config = {"configurable": {"thread_id": record.id}, "recursion_limit": 14}
+    config = graph_config(user_id, UUID(record.id)) if user_id else {
+        "configurable": {"thread_id": record.id},
+        "recursion_limit": 14,
+    }
     collected = []
     needs_break = False
     answer_fallback = ""
@@ -320,16 +338,53 @@ async def live_stream(
 
     memory_context = None
     try:
-        # 拼接会话主题与当前问题检索：追问"接下来读什么"时也能命中方向相关的记忆
-        memory_context = memory_store.context_for(f"{record.title}\n{message}")
+        async with user_session(user_id) as session:
+            memories = await MemoryRepository(session).list_memories(user_id)
+        scoped_memory_store = MemoryStore.__new__(MemoryStore)
+        scoped_memory_store._lock = threading.Lock()
+        scoped_memory_store._save = lambda: None
+        scoped_memory_store._items = [
+            MemoryItem(
+                id=str(row["id"]), text=row["text"], kind=row["kind"],
+                importance=row["importance"], stability=row["stability"],
+                created_at=str(row["created_at"]),
+                last_recalled_at=str(row["last_recalled_at"]),
+                recall_count=row["recall_count"], source=row["source"],
+                thread_id=str(row["thread_id"] or ""),
+            )
+            for row in memories
+        ]
+        memory_context = scoped_memory_store.context_for(f"{record.title}\n{message}")
+        recalled = memory_context.get("episodic") or []
+        if recalled:
+            async with user_session(user_id) as session:
+                repository = MemoryRepository(session)
+                for item in recalled:
+                    await repository.review_memory(user_id, UUID(item.id))
     except Exception:
         logger.exception("长期记忆检索失败（不影响本轮回答）")
+
+    try:
+        async with user_session(user_id) as session:
+            saved_context = await AgentContextRepository(session).load(
+                user_id, UUID(record.id)
+            )
+        prior_state = {
+            "summary": saved_context.get("summary", ""),
+            "paper_catalog": saved_context.get("paper_catalog", []),
+        }
+    except Exception:
+        logger.exception("加载持久化会话上下文失败")
+        prior_state = {}
 
     yield sse("meta", meta_payload(record, demo=False))
 
     try:
         async for event in agent.astream_events(
-            {"messages": [HumanMessage(content=message_for_agent(message, profile, memory_context))]},
+            {
+                **prior_state,
+                "messages": [HumanMessage(content=message_for_agent(message, profile, memory_context))],
+            },
             config=config,
             version="v2",
         ):
@@ -455,17 +510,28 @@ async def live_stream(
         yield sse("error", {"message": "模型没有返回内容，请重试。"})
         return
 
-    if conversation_repository is not None and user_id is not None:
-        await conversation_repository.append_message(
-            user_id,
-            UUID(record.id),
-            "assistant",
-            answer,
-            sources=sources,
-            trace=trace,
-        )
+    if user_id is not None:
+        async with user_session(user_id) as session:
+            repository = ConversationRepository(session)
+            context_repository = AgentContextRepository(session)
+            await repository.append_message(
+                user_id, UUID(record.id), "assistant", answer,
+                sources=sources, trace=trace,
+            )
+            state = await agent.aget_state(config)
+            values = state.values if state else {}
+            catalog = values.get("paper_catalog") or []
+            await context_repository.upsert_papers(user_id, UUID(record.id), catalog)
+            await context_repository.save(
+                user_id,
+                UUID(record.id),
+                values.get("summary", ""),
+                catalog,
+                len(values.get("messages") or []),
+            )
     spawn_background(
-        memory_store.extract_and_remember(
+        persist_extracted_memories(
+            user_id,
             message,
             answer,
             record.id,
@@ -475,11 +541,64 @@ async def live_stream(
     yield sse("done", {"thread_id": record.id})
 
 
+async def persist_extracted_memories(
+    user_id: UUID,
+    message: str,
+    answer: str,
+    thread_id: str,
+    profile_text: str,
+) -> None:
+    global _memory_llm
+    extractor = MemoryStore.__new__(MemoryStore)
+    if _memory_llm is None and settings.llm_configured:
+        from langchain_openai import ChatOpenAI
+
+        _memory_llm = ChatOpenAI(
+            model=settings.deepseek_model,
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            temperature=0.1,
+            max_retries=1,
+            timeout=45,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+    extractor._llm = _memory_llm
+    if extractor._llm is None:
+        return
+    try:
+        parts = [f"用户消息\n{message[:1500]}", f"助手回答\n{answer[:2000]}"]
+        if profile_text:
+            parts.append(f"学习画像\n{profile_text}")
+        response = await extractor._llm.ainvoke(
+            [
+                SystemMessage(content=EXTRACTION_PROMPT),
+                HumanMessage(content="\n\n".join(parts)),
+            ]
+        )
+        from .memory import _content_text, _parse_extraction
+        entries = _parse_extraction(_content_text(response.content))
+        if not entries:
+            return
+        async with user_session(user_id) as session:
+            repository = MemoryRepository(session)
+            for item in entries:
+                await repository.create_memory(
+                    user_id,
+                    item.text,
+                    item.kind,
+                    item.importance,
+                    _initial_stability(item["importance"], item["kind"]),
+                    source="auto",
+                    thread_id=UUID(thread_id),
+                )
+    except Exception:
+        logger.exception("持久化自动记忆失败")
+
+
 async def demo_stream(
     message: str,
     record: ThreadRecord,
     request: Request,
-    conversation_repository: ConversationRepository | None = None,
     user_id: UUID | None = None,
 ):
     trace_item = {
@@ -524,15 +643,12 @@ async def demo_stream(
         yield sse("token", {"text": reply[start : start + 12]})
         await asyncio.sleep(0.016)
 
-    if conversation_repository is not None and user_id is not None:
-        await conversation_repository.append_message(
-            user_id,
-            UUID(record.id),
-            "assistant",
-            reply,
-            sources=items,
-            trace=[trace_item],
-        )
+    if user_id is not None:
+        async with user_session(user_id) as session:
+            await ConversationRepository(session).append_message(
+                user_id, UUID(record.id), "assistant", reply,
+                sources=items, trace=[trace_item],
+            )
     yield sse("done", {"thread_id": record.id})
 
 
@@ -584,24 +700,34 @@ async def chat_stream(
     payload: ChatRequest,
     request: Request,
     user: CurrentUser = Depends(get_current_user),
-    session=Depends(get_user_db_session),
 ) -> StreamingResponse:
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="message 不能为空")
 
-    repository = ConversationRepository(session)
-    if payload.thread_id:
-        try:
-            thread_id = UUID(payload.thread_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
-        row = await repository.get_thread(user.id, thread_id)
-        if row is None:
+    async with user_session(user.id) as session:
+        repository = ConversationRepository(session)
+        if payload.thread_id:
+            try:
+                thread_id = UUID(payload.thread_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail="thread not found") from exc
+            row = await repository.get_thread(user.id, thread_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="thread not found")
+        else:
+            row = await repository.create_thread(user.id, message)
+            thread_id = UUID(str(row["id"]))
+
+        profile = payload.profile if payload.profile and not payload.profile.is_empty() else None
+        if await repository.append_message(
+            user.id,
+            thread_id,
+            "user",
+            message,
+            profile=profile.model_dump(exclude_none=True) if profile else None,
+        ) is None:
             raise HTTPException(status_code=404, detail="thread not found")
-    else:
-        row = await repository.create_thread(user.id, message)
-        thread_id = UUID(str(row["id"]))
 
     record = ThreadRecord(
         id=str(thread_id),
@@ -609,20 +735,10 @@ async def chat_stream(
         created_at=str(row.get("created_at") or ""),
         updated_at=str(row.get("updated_at") or ""),
     )
-    profile = payload.profile if payload.profile and not payload.profile.is_empty() else None
-    if await repository.append_message(
-        user.id,
-        thread_id,
-        "user",
-        message,
-        profile=profile.model_dump(exclude_none=True) if profile else None,
-    ) is None:
-        raise HTTPException(status_code=404, detail="thread not found")
-
     generator = (
-        demo_stream(message, record, request, repository, user.id)
+        demo_stream(message, record, request, user.id)
         if not settings.llm_configured
-        else live_stream(message, record, request, profile, repository, user.id)
+        else live_stream(message, record, request, profile, user.id)
     )
     return StreamingResponse(
         generator, media_type="text/event-stream", headers=event_headers()
@@ -666,7 +782,12 @@ async def add_memory(
     if not text:
         raise HTTPException(status_code=422, detail="记忆内容不能为空")
     await MemoryRepository(session).create_memory(
-        user.id, text, payload.kind, payload.importance, stability=9, source="manual",
+        user.id,
+        text,
+        payload.kind,
+        payload.importance,
+        stability=_initial_stability(payload.importance, payload.kind),
+        source="manual",
     )
     memories = await MemoryRepository(session).list_memories(user.id)
     return memory_snapshot(memories)

@@ -9,6 +9,43 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from .config import get_settings
 
 _engines = {}
+_checkpoint_context = None
+_checkpoint_saver = None
+
+
+async def initialize_checkpointer():
+    global _checkpoint_context, _checkpoint_saver
+    settings = get_settings()
+    database_url = settings.supabase_db_url.get_secret_value()
+    if not database_url:
+        return None
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    psycopg_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    if psycopg_url == database_url and psycopg_url.startswith("postgres://"):
+        psycopg_url = psycopg_url.replace("postgres://", "postgresql://", 1)
+    context = AsyncPostgresSaver.from_conn_string(psycopg_url)
+    saver = await context.__aenter__()
+    try:
+        await saver.setup()
+    except Exception as exc:
+        await context.__aexit__(type(exc), exc, exc.__traceback__)
+        raise
+    _checkpoint_context = context
+    _checkpoint_saver = saver
+    return saver
+
+
+def get_checkpointer():
+    return _checkpoint_saver
+
+
+async def dispose_checkpointer() -> None:
+    global _checkpoint_context, _checkpoint_saver
+    if _checkpoint_context is not None:
+        await _checkpoint_context.__aexit__(None, None, None)
+    _checkpoint_context = None
+    _checkpoint_saver = None
 
 def create_session_factory(database_url: str):
     engine = _engines.get(database_url)
@@ -19,6 +56,7 @@ def create_session_factory(database_url: str):
 
 
 async def dispose_engines() -> None:
+    await dispose_checkpointer()
     engines = list(_engines.values())
     _engines.clear()
     for engine in engines:

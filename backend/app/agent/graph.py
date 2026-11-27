@@ -4,7 +4,6 @@ from typing import Annotated, List, TypedDict
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -30,7 +29,7 @@ class AgentState(TypedDict):
     paper_catalog: List[dict]
 
 
-def build_agent(settings: Settings):
+def build_agent(settings: Settings, checkpointer=None):
     llm = ChatOpenAI(
         model=settings.deepseek_model,
         api_key=settings.deepseek_api_key,
@@ -145,4 +144,4 @@ def build_agent(settings: Settings):
     )
     builder.add_edge("tools", "prepare_context")
 
-    return builder.compile(checkpointer=MemorySaver())
+    return builder.compile(checkpointer=checkpointer)
