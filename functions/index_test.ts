@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { handleRequest } from "./app/index.ts";
+import { handleRequest } from "./app/proxy.ts";
 
 Deno.test("forwards user bearer separately from gateway credential", async () => {
   let receivedHeaders: Headers | undefined;
@@ -37,6 +37,25 @@ Deno.test("does not substitute gateway credential for missing user token", async
 
   assertEquals(receivedHeaders?.has("authorization"), false);
   assertEquals(receivedHeaders?.get("x-harness-gateway-token"), "edge-secret");
+});
+
+Deno.test("accepts canonical UUID thread identifiers", async () => {
+  let upstreamUrl = "";
+  const threadId = "123e4567-e89b-42d3-a456-426614174000";
+  const response = await handleRequest(
+    new Request(`https://site.test/api/threads/${threadId}`),
+    "https://backend.test",
+    "edge-secret",
+    async (input) => {
+      upstreamUrl = String(input);
+      return new Response(JSON.stringify({ id: threadId }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  );
+
+  assertEquals(response.status, 200);
+  assertEquals(upstreamUrl, `https://backend.test/api/threads/${threadId}`);
 });
 
 Deno.test("preserves streamed SSE response body", async () => {

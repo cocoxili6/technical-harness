@@ -662,10 +662,7 @@ def health() -> dict:
         "search": "arXiv + OpenAlex + Google Scholar"
         if settings.scholar_configured
         else "arXiv + OpenAlex",
-        "memory": (
-            "short-term in-process with rolling summary · "
-            "long-term on disk (Ebbinghaus decay)"
-        ),
+        "memory": "Supabase PostgreSQL: per-user sessions, rolling context, and long-term memory",
     }
 
 

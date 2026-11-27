@@ -9,6 +9,8 @@
 
 当前仓库是**本地可运行脚手架**，尚未发布到 Qoder Sites。未配置模型 Key 时自动进入演示模式，界面上的示例内容会明确标注。
 
+身份验证使用 Supabase Auth 邮箱一次性验证码。会话、消息、长期记忆、LangGraph 检查点、论文清单和滚动摘要保存在 Supabase PostgreSQL，并按已验证的用户 ID 隔离。
+
 ## 目录
 
 ```text
@@ -16,8 +18,11 @@ backend/
   app/
     main.py              FastAPI 入口、SSE 协议、会话接口
     config.py            环境配置
-    store.py             会话元数据 + 界面消息投影（进程内）
-    memory.py            长期记忆：遗忘曲线、持久化、自动抽取
+    auth.py              Supabase JWT 验证与网关凭据校验
+    db.py                PostgreSQL 用户事务、RLS claims、LangGraph saver 生命周期
+    repositories/        用户隔离的会话、记忆和上下文仓储
+    migrations/          用户数据表、外键和 RLS 策略
+    memory.py            长期记忆遗忘曲线、检索与自动抽取逻辑
     demo.py              未配置 Key 时的演示流
     agent/
       graph.py           LangGraph: prepare_context -> assistant <-> ToolNode
@@ -28,18 +33,21 @@ backend/
   Dockerfile
   .env.example
 frontend/
+  .env.example
   src/
     App.vue              工作台、会话状态、流式消费
-    components/          侧栏、会话、Markdown、轨迹、来源、输入框
+    components/
+      AuthGate.vue       邮箱 OTP 登录界面
+      ...               侧栏、会话、Markdown、轨迹、来源、输入框
     lib/api.ts           HTTP + SSE 客户端
-  .env.example
 functions/
-  app/index.ts           Qoder Sites Edge Function：FastAPI 同源代理
+  app/index.ts           Qoder Sites Edge Function 部署入口
+  app/proxy.ts           白名单校验、Supabase bearer 与网关凭据转发
 ```
 
 ## 快速开始
 
-前置：Python 3.9+（推荐 3.11）、Node.js 20+。
+前置：Python 3.11+、Node.js 20+。
 
 启动后端（Windows）：
 
@@ -109,33 +117,36 @@ SERPER_API_KEY=你的Key
 
 ## 长期记忆（遗忘曲线）
 
-侧栏「长期记忆」卡片打开管理面板。记忆跨会话、跨重启生效，存放在 `backend/data/memories.json`（可用 `MEMORY_FILE` 改路径）。
+登录后，侧栏「长期记忆」卡片打开管理面板。记忆存放在 Supabase `public.memories` 表，并由 RLS 与显式 `user_id` 条件双重隔离。旧版本地 `backend/data/memories.json` 没有可信的账户归属，不会自动导入。
 
 - **写入**：每轮真实对话结束后，后台让 DeepSeek 抽取 0-3 条关于用户的稳定信息；按科研辅导场景分类：知识基础、学习偏好、方向兴趣、方向目标、阅读/复现进展、工具事实。目标和进展必须绑定具体方向，泛化目标（了解全景/找问题）由界面画像承担，不重复记录；相似记忆自动合并，也可在面板里手动添加。
 - **衰减**：每条记忆有稳定度 S（天），强度 `R = e^(−t/S)`，t 为距上次回想的天数。初始 S = `(3 + 3 × 重要度) × 类别系数`：背景/偏好 1.5，兴趣 1.2，目标/事实 1.0，进展 0.6；进展类无论 S 多高，90 天未更新即视为淡忘。
 - **强化**：记忆被当前问题命中、或面板里点「复习」，`S ← S × (1 + 1.5 × (1 − R)) + 0.5`，即越接近遗忘时复习，间隔拉得越长（间隔重复）。
 - **淡忘**：`R < 10%` 视为淡忘，不再注入回答；面板可恢复（强度回到 100%）或删除。最多保留 300 条，超出时优先淘汰最弱的淡忘记忆。
 - **注入（两层）**：稳定画像层（知识基础/学习偏好）每轮常驻，按类别取最强条目拼成 ≤120 字摘要；情景层（兴趣/目标/进展/事实）只注入与当前方向相关的记忆，检索时拼接会话主题与当前问题，最多 5 条、合计 ≤600 字。画像层不会因为常驻展示而强化，只有问题命中才触发强化。
-- 演示模式没有 LLM，自动抽取与记忆注入都不运行，面板仍可手动添加、复习和删除。
+- 演示模式没有 LLM，自动抽取不运行；启用 Supabase 后，面板仍可手动添加、复习和删除记忆。
 
 ## 架构
 
 ```text
-Vue 工作台
-  │  POST /api/chat/stream  (fetch + SSE)
+Vue 工作台 + Supabase Auth
+  │  Supabase access token
   ▼
-FastAPI
-  │
-  ├─ LangGraph: prepare_context -> assistant ──▶ ToolNode(search_arxiv / search_openalex / search_scholar) ──▶ prepare_context
-  │     MemorySaver(thread_id)            arXiv / OpenAlex / Serper API
-  │
-  └─ ConversationStore: 用户/助手消息、检索轨迹、来源卡片
+Qoder Edge Function
+  │  Authorization: Supabase bearer
+  │  x-harness-gateway-token: Edge shared secret
+  ▼
+FastAPI ──▶ Supabase PostgreSQL (RLS + user_id 条件)
+  │              ├─ threads / messages / memories
+  │              ├─ paper_catalog / context_summaries
+  │              └─ LangGraph Postgres checkpointer
+  └─ LangGraph: prepare_context -> assistant <-> ToolNode -> prepare_context
 ```
 
-- **LLM 短期记忆**：LangGraph `MemorySaver` 按 `thread_id` 保存消息序列。上下文由 `prepare_context` 节点管理，按 token 预算滚动压缩，详见下一节。
-- **长期记忆**：`MemoryStore` 抽取用户画像类信息并按遗忘曲线衰减，相关记忆在每轮对话前注入消息，详见上一节。
-- **界面恢复**：`ConversationStore` 额外保存一份界面投影（含检索轨迹和来源），刷新页面后可以通过 `/api/threads/{id}` 恢复。
-- **生命周期**：短期记忆在后端进程内，服务重启即清空；长期记忆在磁盘，重启后保留。前端只在 `localStorage` 记住当前会话 ID。
+- **身份与隔离**：FastAPI 从签名验证通过的 JWT `sub` 获取用户 ID。数据库事务设置 Supabase JWT claims 和 `authenticated` role，所有仓储查询同时显式限定 `user_id`。
+- **会话持久化**：threads、messages、memories、论文目录、工具运行记录、滚动摘要和 LangGraph checkpoint 均存入 PostgreSQL。checkpoint 使用 `checkpoint_ns=user:<user_id>`。
+- **记忆与上下文**：LangGraph `prepare_context` 按 token 预算压缩历史；摘要与论文目录另存于用户隔离的上下文表。长期记忆仍按遗忘曲线检索和强化。
+- **界面恢复**：刷新后从 `/api/threads` 和 `/api/threads/{id}` 恢复数据库会话。浏览器只在 `localStorage` 记住当前 thread ID。
 
 ### 上下文管理
 
@@ -182,79 +193,88 @@ FastAPI
 | `ARXIV_ENDPOINT` | `https://export.arxiv.org/api/query` | 文献检索端点 |
 | `SERPER_API_KEY` | 空 | 为空时智能体只有 arXiv 工具；填入后启用 Google Scholar 检索 |
 | `CORS_ORIGINS` | 本地 5173 | 逗号分隔；使用 Edge Function 代理时浏览器不跨域 |
-| `MEMORY_FILE` | `data/memories.json` | 长期记忆存储路径（相对 `backend/`） |
 | `CONTEXT_TOKEN_BUDGET` | `28000` | 上下文预算（估算 token），超限触发滚动摘要 |
 | `CONTEXT_KEEP_TURNS` | `2` | 压缩时保留最近几轮原文 |
 | `CONTEXT_CATALOG_LIMIT` | `40` | 每轮注入论文清单的最大条数 |
-| `HARNESS_SHARED_TOKEN` | 空 | 后端侧共享令牌；为空表示不校验 |
+| `SUPABASE_URL` | 空 | Supabase 项目 URL |
+| `SUPABASE_JWT_ISSUER` | 空 | `https://<project-ref>.supabase.co/auth/v1` |
+| `SUPABASE_JWT_AUDIENCE` | `authenticated` | access token audience |
+| `SUPABASE_JWKS_URL` | 空 | Supabase Auth JWKS endpoint |
+| `SUPABASE_DB_URL` | 空 | 后端 PostgreSQL session pooler URL，使用 `postgresql+asyncpg://` scheme |
+| `HARNESS_SHARED_TOKEN` | 空 | Edge 到 FastAPI 的共享凭据，放在 `x-harness-gateway-token` |
 
-`HARNESS_SHARED_TOKEN` 与 Edge Function 配合使用。本地经 Vite 代理直连后端时保持为空，否则请求会 401。
+Supabase URL 和 publishable anon key 是前端公开配置，不要把 `service_role` key 放入浏览器变量。数据库密码、DeepSeek key 和 `HARNESS_SHARED_TOKEN` 只放在后端或 Edge secret。开发环境的 `.env`、`env1.env` 和 `.env.local` 都已加入 Git 忽略。
+
+本地使用 Vite 代理直连 FastAPI 时，后端 `HARNESS_SHARED_TOKEN` 留空；走 Edge Function 时，后端与 Edge 两侧设置相同的共享值。
 
 ## 扩展
 
 - **换检索源**：在 `backend/app/agent/tools.py` 新增 `@tool`，按 arXiv 工具的结构返回 JSON 字符串；然后在 `graph.py` 的 `tools` 列表中加入它。
 - **改阅读路线结构**：编辑 `backend/app/agent/prompts.py`。
-- **换持久化**：把 `MemorySaver` 换成 SQLite/Postgres checkpointer，并把 `ConversationStore` 换成数据库表；长期记忆同理可把 `backend/app/memory.py` 的 JSON 存储换成数据库。<`thread_id` 契约不变，前端无需改动。
+- **持久化边界**：仓储接口位于 `backend/app/repositories/`；用户表结构和 RLS 位于 `backend/migrations/0001_user_data.sql`。LangGraph 使用 `AsyncPostgresSaver` 的官方 schema setup。
 
-## 部署到 Qoder Sites（方案 A：保留 Python）
+## 配置 Supabase
 
-Qoder Sites 只能托管静态文件和一个 TypeScript/Deno Edge Function，不能运行 Python。当前方案：
+1. 在 Supabase 创建项目并启用 Authentication 的 Email provider。
+2. 要让用户输入数字验证码，在 Authentication → Email Templates 的登录验证码模板中使用 `{{ .Token }}`，并确认 Email OTP 已启用。按项目计划配置 SMTP 与邮件发送额度。
+3. 在 SQL Editor 执行 `backend/migrations/0001_user_data.sql`，创建用户数据表、复合外键与 `auth.uid()` RLS policies。
+4. 从 Database → Connect 复制 session pooler 连接信息。后端连接串使用 `postgresql+asyncpg://` scheme，并对密码中的保留字符做 URL 编码。
+5. 前端只使用 Project URL 和 publishable anon key。不要使用 `service_role` key。
+
+FastAPI 启动时会调用 LangGraph `AsyncPostgresSaver.setup()` 初始化其官方 checkpoint schema。旧版本地 `backend/data/memories.json` 没有可信的账户归属，不会自动导入。
+
+本地运行时，将 `backend/.env.example` 复制为 `backend/.env`，将 `frontend/.env.example` 复制为 `frontend/.env.local`，再填入各自的配置。
+
+## 部署到 Qoder Sites
+
+Qoder Sites 托管静态前端和 TypeScript/Deno Edge Function，FastAPI 运行在独立服务器。
 
 ```text
-浏览器 → Qoder Sites 静态站 + Edge Function 同源代理 → 外部 FastAPI/LangGraph → DeepSeek / arXiv
+浏览器（Supabase Auth）→ Qoder Sites + Edge Function → FastAPI/LangGraph → Supabase PostgreSQL
 ```
 
-### 1. 部署 Python 后端
+### 1. 部署 FastAPI 后端
 
-用 `backend/Dockerfile` 部署到 Railway、Fly.io、Render 或自有服务器，配置：
+用 `backend/Dockerfile` 部署到 Railway、Fly.io、Render 或自有服务器。配置 `backend/.env.example` 中的后端变量，至少包括：
 
 ```ini
 DEEPSEEK_API_KEY=...
-HARNESS_SHARED_TOKEN=一个随机长字符串
-CORS_ORIGINS=https://你的站点域名
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_JWT_ISSUER=https://<project-ref>.supabase.co/auth/v1
+SUPABASE_JWKS_URL=https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json
+SUPABASE_JWT_AUDIENCE=authenticated
+SUPABASE_DB_URL=postgresql+asyncpg://postgres.<project-ref>:<URL-encoded-password>@<pooler-host>:5432/postgres
+HARNESS_SHARED_TOKEN=<long-random-secret>
 ```
 
-要求：
-
-- 公网 HTTPS 可达；
-- 反向代理关闭响应缓冲（FastAPI 已发送 `X-Accel-Buffering: no`，Nginx 可配 `proxy_buffering off;`）；
-- 实例至少能保持 5 分钟以上的流式连接。
+后端需要公网 HTTPS、至少 5 分钟的流式连接时长。反向代理须关闭响应缓冲，Nginx 可设置 `proxy_buffering off;`。
 
 ### 2. 配置 Edge Function
 
-`functions/app/index.ts` 已实现白名单代理：`/api/health`、`/api/threads`、`/api/threads/{id}`、`/api/chat/stream`、`/api/memories`（含复习与删除）。它不暴露任意上游，也不把令牌返回给浏览器。
+Function 白名单代理健康检查、会话、聊天和记忆接口。它将浏览器的 Supabase bearer token 放在 `Authorization`，并把 Edge 共享凭据单独放在 `x-harness-gateway-token`。
 
-在 Qoder Sites 中为该 Function 声明并配置两个 Secret：
+在 Qoder Sites 为 Function 配置两个 Secret：
 
-- `HARNESS_BACKEND_URL`：FastAPI 的 origin，例如 `https://harness-api.example.com`（不要带 `/api`）
-- `HARNESS_SHARED_TOKEN`：与后端同名变量一致
+- `HARNESS_BACKEND_URL`：FastAPI origin，例如 `https://harness-api.example.com`，不要带 `/api`。
+- `HARNESS_SHARED_TOKEN`：与 FastAPI 环境变量完全一致。
 
-### 3. 构建前端
+### 3. 构建并发布前端
 
-```bash
-cd frontend
-VITE_API_BASE=/functions/v1/app npm run build
+在 Qoder Sites 的构建环境配置公开变量：
+
+```ini
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+VITE_SUPABASE_ANON_KEY=<publishable-anon-key>
+VITE_API_BASE=/functions/v1/app
 ```
 
-这样浏览器请求 `/functions/v1/app/api/...`，由 Edge Function 转发到 FastAPI 的 `/api/...`。
+这些值会写入浏览器构建产物。数据库密码、DeepSeek API key 和 `HARNESS_SHARED_TOKEN` 只能留在服务端或 Edge Secrets。
 
-### 4. 准备并发布
+构建命令为 `cd frontend && npm run build`。发布时设置静态目录 `frontend/dist` 和 Function 目录 `functions/app`。在已发布站点验证邮箱验证码登录、会话恢复与 SSE 流式聊天。
 
-通过 Qoder Sites 以以下输入准备站点：
+Function 上游超时设为 5 分钟，实际可用时长还受 Qoder 平台限制。
 
-- 静态目录：`frontend/dist`
-- Function 目录：`functions/app`
-- 需要声明的 Secret：`HARNESS_BACKEND_URL`、`HARNESS_SHARED_TOKEN`
-
-准备完成后在 Sites 设置中录入 Secret 值并等待同步，再发布。发布预览不执行 Function，健康检查、流式对话和会话恢复需要在已发布站点上验证。
-
-### 部署注意
-
-- Function 设置了 5 分钟上游超时；平台本身可能还有更短的执行时限，长调研需要拆分或改轮询方案。
-- 公开站点意味着任何人都能调用这个代理并消耗你的模型额度。建议把站点设为受控访问，或再加应用级限流/登录。
-- 不使用代理、让前端直连 FastAPI 也可行：`VITE_API_BASE=https://api.example.com`，并把站点域名加入 `CORS_ORIGINS`。这样更简单，但后端 API 对公网开放。
-
-## 验证记录（2026-11-20）
+## 历史验证记录（2026-11-20）
 
 | 项目 | 结果 |
 | --- | --- |
@@ -271,3 +291,16 @@ VITE_API_BASE=/functions/v1/app npm run build
 | 前端类型检查 / 生产构建 | 通过 |
 
 真实分支的 mock 只验证了“LangGraph + ChatOpenAI 兼容协议 + 工具 + SSE + 前端”的链路，不证明 DeepSeek 账号、额度和网络可用性。
+
+## 身份与持久化验证记录（2026-11-27）
+
+| 项目 | 结果 |
+| --- | --- |
+| Supabase 用户表迁移与 RLS | 通过：六张业务表启用 RLS；两名临时用户实测互相不可见，测试账号已清理 |
+| 会话/消息/记忆 repositories | 通过：owner 可读写，另一用户读不到；临时测试用户已清理 |
+| 摘要与论文目录恢复 | 通过：新 repository 实例能从 Supabase 读回保存状态，测试用户已清理 |
+| LangGraph checkpoint schema | 通过：应用当前安装包提供的官方 migrations 到版本 9；本机 Windows 策略阻止 psycopg 二进制扩展加载，因此 saver 运行时启动仍需在 Linux 部署环境确认 |
+| 后端测试 | 通过：21 项；有 1 条 LangChain pending-deprecation warning |
+| 前端 OTP、API token、登出清理 | 通过：9 项 Vitest，TypeScript typecheck 和 Vite production build 通过 |
+| Supabase 邮件 OTP 实际收件 | 待验证：需要在 Supabase 配置邮件模板/SMTP 后，用真实邮箱完成一次登录 |
+| Edge Function 测试 | 待验证：已添加 Deno tests，但本机没有 Deno runtime |

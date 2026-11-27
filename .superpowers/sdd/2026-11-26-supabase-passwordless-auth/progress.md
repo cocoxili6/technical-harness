@@ -36,6 +36,6 @@ Task 2: complete (commits e32228d..8aa0bf2, review clean after one fix round)
 Task 3: complete (RLS claims set in transaction as role authenticated plus explicit user predicates; repository append locking and pooled engine lifecycle reviewed)
 Task 4: complete (thread/message and manual-memory routes use user-scoped database sessions; SSE writes persist user and assistant messages; response shape preserved)
 Task 5: complete (Postgres saver is injected through application lifespan; checkpoint namespace uses verified user UUID; summaries, paper catalog, and automatic memories persist per user; official LangGraph migrations and Supabase repository restore checks passed; Windows blocks loading psycopg binary locally, so saver runtime startup must be verified in deployment)
-Task 6: complete (Edge proxy forwards user Authorization and x-harness-gateway-token separately; Deno forwarding/SSE tests added; static diff checks passed; Deno runtime unavailable on this host)
+Task 6: complete (Edge proxy forwards user Authorization and x-harness-gateway-token separately; UUID thread IDs match backend; four Deno tests added; TypeScript syntax check passed; Deno runtime unavailable on this host)
 Task 7: complete (email OTP/session restore/sign-out; bearer token on JSON/SSE with one refresh retry; user UI state clears on sign-out; 8 frontend tests, typecheck, and build pass)
-Task 8: pending
+Task 8: complete (Supabase/Auth/Edge deployment guide and env templates updated; legacy JSON import excluded; final backend/frontend/static checks passed)

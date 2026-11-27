@@ -98,7 +98,7 @@ defineEmits<{
         <div class="memory-value">
           {{ activeThreadId ? `本会话已记忆 ${turnCount} 轮` : "尚未开始会话" }}
         </div>
-        <p>上下文保存在后端进程内，服务重启后清空。</p>
+        <p>会话与上下文按账户保存在 Supabase，刷新后可继续。</p>
       </div>
 
       <button type="button" class="memory-card long-term" @click="$emit('memories')">
