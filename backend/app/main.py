@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
@@ -13,6 +14,7 @@ from .agent.analysis import PaperAnalyzer, PaperInput, demo_analysis
 from .auth import CurrentUser, get_current_user, verify_gateway_token
 from .agent.graph import build_agent
 from .config import get_settings
+from .db import dispose_engines
 from .demo import build_demo_reply, build_demo_sources
 from .memory import KIND_LABELS, MemoryStore
 from .store import ConversationStore, ThreadRecord
@@ -48,7 +50,13 @@ def get_agent():
     return _agent
 
 
-app = FastAPI(title=settings.app_name, version="0.1.0")
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    yield
+    await dispose_engines()
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=app_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
