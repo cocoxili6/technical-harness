@@ -1,70 +1,50 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from "vue";
-import { isSupabaseConfigured, requestEmailCode, verifyEmailCode } from "../lib/supabase";
+import { ref } from "vue";
+import {
+  isSupabaseConfigured,
+  requestPasswordReset,
+  signInWithPassword,
+  signUpWithPassword,
+} from "../lib/supabase";
 
 const email = ref("");
-const code = ref("");
-const stage = ref<"email" | "code">("email");
+const password = ref("");
+const mode = ref<"login" | "signup" | "recovery">("login");
 const busy = ref(false);
 const error = ref("");
 const notice = ref("");
-const resendSeconds = ref(0);
-let resendTimer: number | undefined;
 
-function startResendCooldown(): void {
-  resendSeconds.value = 30;
-  window.clearInterval(resendTimer);
-  resendTimer = window.setInterval(() => {
-    resendSeconds.value -= 1;
-    if (resendSeconds.value <= 0) {
-      resendSeconds.value = 0;
-      window.clearInterval(resendTimer);
+async function submit(): Promise<void> {
+  error.value = "";
+  notice.value = "";
+  busy.value = true;
+  try {
+    const normalizedEmail = email.value.trim();
+    if (mode.value === "login") {
+      await signInWithPassword(normalizedEmail, password.value);
+    } else if (mode.value === "signup") {
+      const result = await signUpWithPassword(normalizedEmail, password.value);
+      if (result.confirmationRequired) {
+        mode.value = "login";
+        notice.value = "请检查邮箱并完成确认，然后使用密码登录。";
+      }
+    } else {
+      await requestPasswordReset(normalizedEmail);
+      notice.value = "密码重置邮件已发送，请检查邮箱。";
     }
-  }, 1000);
-}
-
-async function submitEmail(): Promise<void> {
-  error.value = "";
-  notice.value = "";
-  busy.value = true;
-  try {
-    await requestEmailCode(email.value.trim());
-    stage.value = "code";
-    notice.value = "验证码已发送，请检查邮箱。";
-    startResendCooldown();
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "验证码发送失败，请重试。";
+    error.value = cause instanceof Error ? cause.message : "操作失败，请重试。";
   } finally {
     busy.value = false;
   }
 }
 
-async function submitCode(): Promise<void> {
-  error.value = "";
-  notice.value = "";
-  busy.value = true;
-  try {
-    await verifyEmailCode(email.value.trim(), code.value.trim());
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "验证码无效，请重试。";
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function resendCode(): Promise<void> {
-  if (resendSeconds.value > 0 || busy.value) return;
-  await submitEmail();
-}
-
-function editEmail(): void {
-  stage.value = "email";
-  code.value = "";
+function setMode(nextMode: "login" | "signup" | "recovery"): void {
+  mode.value = nextMode;
+  password.value = "";
   error.value = "";
   notice.value = "";
 }
-
-onBeforeUnmount(() => window.clearInterval(resendTimer));
 </script>
 
 <template>
@@ -72,17 +52,18 @@ onBeforeUnmount(() => window.clearInterval(resendTimer));
     <section class="auth-card" aria-labelledby="auth-title">
       <div class="auth-mark" aria-hidden="true">研</div>
       <p class="auth-eyebrow">研途 · 研究工作台</p>
-      <h1 id="auth-title">{{ stage === "email" ? "登录你的账户" : "输入邮箱验证码" }}</h1>
+      <h1 id="auth-title">{{ mode === "signup" ? "创建账户" : mode === "recovery" ? "重置密码" : "登录你的账户" }}</h1>
       <p class="auth-description">
-        {{ stage === "email" ? "输入邮箱，我们会发送一次性验证码。" : `验证码已发送至 ${email}` }}
+        {{ mode === "signup" ? "使用邮箱和密码创建你的研究账户。" : mode === "recovery" ? "输入账户邮箱，我们会发送密码重置链接。" : "使用邮箱和密码登录。" }}
       </p>
 
       <p v-if="!isSupabaseConfigured" class="auth-message error" role="alert">
         登录服务尚未配置，请设置 VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY。
       </p>
 
-      <form v-if="stage === 'email'" @submit.prevent="submitEmail">
+      <form @submit.prevent="submit">
         <label for="auth-email">邮箱地址</label>
+        <label for="auth-password">密码</label>
         <input
           id="auth-email"
           v-model="email"
@@ -92,38 +73,25 @@ onBeforeUnmount(() => window.clearInterval(resendTimer));
           required
           :disabled="busy || !isSupabaseConfigured"
         />
-        <button class="auth-primary" type="submit" :disabled="busy || !isSupabaseConfigured">
-          {{ busy ? "正在发送…" : "发送一次性验证码" }}
-        </button>
-      </form>
-
-      <form v-else @submit.prevent="submitCode">
-        <label for="auth-code">一次性验证码</label>
         <input
-          id="auth-code"
-          v-model="code"
-          type="text"
-          inputmode="numeric"
-          autocomplete="one-time-code"
-          placeholder="输入邮箱中的验证码"
-          minlength="6"
-          maxlength="8"
-          required
-          :disabled="busy"
+          id="auth-password"
+          v-model="password"
+          type="password"
+          :autocomplete="mode === 'signup' ? 'new-password' : 'current-password'"
+          :placeholder="mode === 'recovery' ? '无需填写' : '至少 8 个字符'"
+          :minlength="mode === 'recovery' ? undefined : 8"
+          :required="mode !== 'recovery'"
+          :disabled="busy || !isSupabaseConfigured || mode === 'recovery'"
         />
-        <button class="auth-primary" type="submit" :disabled="busy">
-          {{ busy ? "正在验证…" : "验证并登录" }}
+        <button class="auth-primary" type="submit" :disabled="busy || !isSupabaseConfigured">
+          {{ busy ? "请稍候…" : mode === "signup" ? "创建账户" : mode === "recovery" ? "发送重置邮件" : "登录" }}
         </button>
-        <div class="auth-actions">
-          <button type="button" class="auth-link" @click="editEmail">更换邮箱</button>
-          <button
-            type="button"
-            class="auth-link"
-            :disabled="busy || resendSeconds > 0"
-            @click="resendCode"
-          >
-            {{ resendSeconds > 0 ? `${resendSeconds} 秒后重新发送` : "重新发送验证码" }}
-          </button>
+        <div v-if="mode === 'login'" class="auth-actions">
+          <button type="button" class="auth-link" data-action="signup" :disabled="busy" @click="setMode('signup')">创建账户</button>
+          <button type="button" class="auth-link" data-action="recovery" :disabled="busy" @click="setMode('recovery')">忘记密码</button>
+        </div>
+        <div v-else class="auth-actions">
+          <button type="button" class="auth-link" :disabled="busy" @click="setMode('login')">返回登录</button>
         </div>
       </form>
 

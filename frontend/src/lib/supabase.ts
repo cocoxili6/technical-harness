@@ -13,6 +13,7 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
 
 export const authSession = ref<Session | null>(null);
 export const authReady = ref(false);
+export const passwordRecoveryPending = ref(false);
 
 let initialized = false;
 
@@ -24,8 +25,9 @@ export async function initializeSupabaseAuth(): Promise<void> {
     return;
   }
 
-  supabase.auth.onAuthStateChange((_event, session) => {
+  supabase.auth.onAuthStateChange((event, session) => {
     authSession.value = session;
+    if (event === "PASSWORD_RECOVERY") passwordRecoveryPending.value = true;
     authReady.value = true;
   });
   try {
@@ -38,27 +40,43 @@ export async function initializeSupabaseAuth(): Promise<void> {
   }
 }
 
-export async function requestEmailCode(email: string): Promise<void> {
+export async function signUpWithPassword(
+  email: string,
+  password: string,
+): Promise<{ confirmationRequired: boolean }> {
   if (!supabase) throw new Error("登录服务尚未配置，请设置 Supabase 前端环境变量。");
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: { shouldCreateUser: true },
+  const { data, error } = await supabase.auth.signUp({ email, password });
+  if (error) throw error;
+  if (data.session) {
+    authSession.value = data.session;
+    authReady.value = true;
+  }
+  return { confirmationRequired: !data.session };
+}
+
+export async function signInWithPassword(email: string, password: string): Promise<Session> {
+  if (!supabase) throw new Error("登录服务尚未配置，请设置 Supabase 前端环境变量。");
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  if (!data.session) throw new Error("登录成功但会话未建立，请重试。");
+  authSession.value = data.session;
+  authReady.value = true;
+  return data.session;
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  if (!supabase) throw new Error("登录服务尚未配置，请设置 Supabase 前端环境变量。");
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin,
   });
   if (error) throw error;
 }
 
-export async function verifyEmailCode(email: string, code: string): Promise<Session> {
+export async function updatePassword(password: string): Promise<void> {
   if (!supabase) throw new Error("登录服务尚未配置，请设置 Supabase 前端环境变量。");
-  const { data, error } = await supabase.auth.verifyOtp({
-    email,
-    token: code,
-    type: "email",
-  });
+  const { error } = await supabase.auth.updateUser({ password });
   if (error) throw error;
-  if (!data.session) throw new Error("验证完成，但未能建立登录会话，请重试。");
-  authSession.value = data.session;
-  authReady.value = true;
-  return data.session;
+  passwordRecoveryPending.value = false;
 }
 
 export async function getAccessToken(): Promise<string | null> {

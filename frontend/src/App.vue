@@ -8,6 +8,7 @@ import {
   watch,
 } from "vue";
 import AuthGate from "./components/AuthGate.vue";
+import PasswordRecoveryGate from "./components/PasswordRecoveryGate.vue";
 import ConversationView from "./components/ConversationView.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
 import ResearchComposer from "./components/ResearchComposer.vue";
@@ -15,7 +16,7 @@ import Sidebar from "./components/Sidebar.vue";
 import { getHealth, getThread, listMemories, listThreads, streamChat } from "./lib/api";
 import { createId } from "./lib/format";
 import { isEmptyProfile } from "./lib/profile";
-import { authReady, authSession, signOut } from "./lib/supabase";
+import { authReady, authSession, passwordRecoveryPending, signOut } from "./lib/supabase";
 import type {
   BackendState,
   ChatMessage,
@@ -429,7 +430,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <AuthGate v-if="!authReady || !authSession" />
+  <AuthGate v-if="!authReady || (!authSession && !passwordRecoveryPending)" />
+  <PasswordRecoveryGate v-else-if="passwordRecoveryPending" />
   <template v-else>
     <a class="skip-link" href="#main-scroll">跳到主要内容</a>
 

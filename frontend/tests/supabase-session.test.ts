@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { authMethods } = vi.hoisted(() => ({
   authMethods: {
-    signInWithOtp: vi.fn(),
-    verifyOtp: vi.fn(),
+    signUp: vi.fn(),
+    signInWithPassword: vi.fn(),
+    resetPasswordForEmail: vi.fn(),
+    updateUser: vi.fn(),
     getSession: vi.fn(),
     refreshSession: vi.fn(),
     signOut: vi.fn(),
@@ -23,28 +25,45 @@ describe("Supabase email session", () => {
     vi.resetModules();
   });
 
-  it("requests an OTP and stores the verified session", async () => {
+  it("signs up and signs in with email and password", async () => {
     const session = {
       access_token: "verified-access-token",
       user: { id: "user-1", email: "reader@example.com" },
     };
-    authMethods.signInWithOtp.mockResolvedValue({ error: null });
-    authMethods.verifyOtp.mockResolvedValue({ data: { session }, error: null });
+    authMethods.signUp.mockResolvedValue({ data: { session: null, user: session.user }, error: null });
+    authMethods.signInWithPassword.mockResolvedValue({ data: { session }, error: null });
     const auth = await import("../src/lib/supabase");
 
-    await auth.requestEmailCode("reader@example.com");
-    const verified = await auth.verifyEmailCode("reader@example.com", "321654");
+    const signup = await auth.signUpWithPassword("reader@example.com", "password-123");
+    const verified = await auth.signInWithPassword("reader@example.com", "password-123");
 
-    expect(authMethods.signInWithOtp).toHaveBeenCalledWith({
+    expect(authMethods.signUp).toHaveBeenCalledWith({
       email: "reader@example.com",
-      options: { shouldCreateUser: true },
+      password: "password-123",
     });
-    expect(authMethods.verifyOtp).toHaveBeenCalledWith({
+    expect(signup.confirmationRequired).toBe(true);
+    expect(authMethods.signInWithPassword).toHaveBeenCalledWith({
       email: "reader@example.com",
-      token: "321654",
-      type: "email",
+      password: "password-123",
     });
     expect(verified).toBe(session);
     expect(auth.authSession.value).toEqual(session);
+  });
+
+  it("requests password reset and updates the password from a recovery session", async () => {
+    authMethods.resetPasswordForEmail.mockResolvedValue({ error: null });
+    authMethods.updateUser.mockResolvedValue({ error: null });
+    const auth = await import("../src/lib/supabase");
+
+    await auth.requestPasswordReset("reader@example.com");
+    auth.passwordRecoveryPending.value = true;
+    await auth.updatePassword("new-password-123");
+
+    expect(authMethods.resetPasswordForEmail).toHaveBeenCalledWith(
+      "reader@example.com",
+      { redirectTo: window.location.origin },
+    );
+    expect(authMethods.updateUser).toHaveBeenCalledWith({ password: "new-password-123" });
+    expect(auth.passwordRecoveryPending.value).toBe(false);
   });
 });
