@@ -5,7 +5,9 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from "vue";
+import AuthGate from "./components/AuthGate.vue";
 import ConversationView from "./components/ConversationView.vue";
 import MemoryPanel from "./components/MemoryPanel.vue";
 import ResearchComposer from "./components/ResearchComposer.vue";
@@ -13,6 +15,7 @@ import Sidebar from "./components/Sidebar.vue";
 import { getHealth, getThread, listMemories, listThreads, streamChat } from "./lib/api";
 import { createId } from "./lib/format";
 import { isEmptyProfile } from "./lib/profile";
+import { authReady, authSession, signOut } from "./lib/supabase";
 import type {
   BackendState,
   ChatMessage,
@@ -46,6 +49,7 @@ const mobileSidebarOpen = ref(false);
 const loadError = ref("");
 const scrollEl = ref<HTMLElement | null>(null);
 const composerRef = ref<InstanceType<typeof ResearchComposer> | null>(null);
+const userEmail = computed(() => authSession.value?.user.email ?? "");
 
 let controller: AbortController | null = null;
 let generation = 0;
@@ -237,6 +241,47 @@ async function reconnect(): Promise<void> {
   }
 }
 
+async function loadWorkspace(): Promise<void> {
+  await refreshHealth();
+  if (!backendReady.value) return;
+  await refreshThreads();
+  await restoreThread();
+  void refreshMemoryStats();
+}
+
+async function handleSignOut(): Promise<void> {
+  try {
+    await signOut();
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : "退出登录失败，请重试。";
+  }
+}
+
+function clearUserWorkspace(): void {
+  stopStream();
+  threads.value = [];
+  activeThreadId.value = null;
+  activeTitle.value = "";
+  messages.value = [];
+  draft.value = "";
+  profile.value = {};
+  memoryStats.value = null;
+  memoriesOpen.value = false;
+  mobileSidebarOpen.value = false;
+  loadError.value = "";
+  health.value = null;
+  backendState.value = "connecting";
+  localStorage.removeItem(ACTIVE_KEY);
+}
+
+watch(
+  () => authSession.value?.user.id,
+  (userId, previousUserId) => {
+    if (userId) void loadWorkspace();
+    else if (previousUserId) clearUserWorkspace();
+  },
+);
+
 async function send(text: string): Promise<void> {
   if (streaming.value || !backendReady.value) return;
 
@@ -374,13 +419,8 @@ async function send(text: string): Promise<void> {
   }
 }
 
-onMounted(async () => {
-  await refreshHealth();
-  if (backendReady.value) {
-    await refreshThreads();
-    await restoreThread();
-    void refreshMemoryStats();
-  }
+onMounted(() => {
+  if (authSession.value) void loadWorkspace();
 });
 
 onBeforeUnmount(() => {
@@ -389,7 +429,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <a class="skip-link" href="#main-scroll">跳到主要内容</a>
+  <AuthGate v-if="!authReady || !authSession" />
+  <template v-else>
+    <a class="skip-link" href="#main-scroll">跳到主要内容</a>
 
   <div class="app-shell">
     <Sidebar
@@ -455,6 +497,8 @@ onBeforeUnmount(() => {
             <span class="mode-dot" aria-hidden="true"></span>
             {{ statusText }}
           </span>
+          <span class="account-email">{{ userEmail }}</span>
+          <button class="sign-out-button" type="button" @click="handleSignOut">退出</button>
         </div>
       </header>
 
@@ -564,6 +608,7 @@ onBeforeUnmount(() => {
     @close="memoriesOpen = false"
     @changed="memoryStats = $event"
   />
+  </template>
 </template>
 
 <style scoped>
@@ -644,6 +689,25 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
+}
+
+.account-email {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sign-out-button {
+  border: 0;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--accent-deep);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .search-chip {

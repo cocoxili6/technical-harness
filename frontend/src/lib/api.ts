@@ -7,8 +7,26 @@ import type {
   ThreadDetail,
   ThreadSummary,
 } from "../types";
+import { getAccessToken, refreshAccessToken } from "./supabase";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
+
+export async function authenticatedFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = await getAccessToken();
+  if (token) headers.set("authorization", `Bearer ${token}`);
+
+  const response = await fetch(input, { ...init, headers });
+  if (response.status !== 401) return response;
+
+  const refreshedToken = await refreshAccessToken();
+  if (!refreshedToken) return response;
+  headers.set("authorization", `Bearer ${refreshedToken}`);
+  return fetch(input, { ...init, headers });
+}
 
 async function errorFromResponse(response: Response): Promise<Error> {
   let message = `请求失败（${response.status}）`;
@@ -26,7 +44,7 @@ async function errorFromResponse(response: Response): Promise<Error> {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await authenticatedFetch(`${API_BASE}${path}`, {
     ...init,
     headers: { Accept: "application/json", ...init?.headers },
   });
@@ -184,7 +202,7 @@ export async function streamChat(
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${API_BASE}/api/chat/stream`, {
+  const response = await authenticatedFetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

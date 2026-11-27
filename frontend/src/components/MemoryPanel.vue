@@ -220,7 +220,7 @@ onMounted(load);
       </template>
 
       <p class="panel-foot">
-        记忆保存在本机 <code>backend/data/memories.json</code>。自动抽取需要配置 DeepSeek Key；未配置时可手动添加。
+        记忆按账户保存在 Supabase。自动抽取需要配置 DeepSeek Key；未配置时可手动添加。
       </p>
     </aside>
   </div>
